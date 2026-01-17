@@ -332,9 +332,16 @@ export interface ClipMorphAPI {
 
   /**
    * Get current window state
-   * @returns Promise resolving to current expanded state
+   * @returns Promise resolving to current expanded state and mode
    */
-  getWindowState: () => Promise<IpcResponse<{ expanded: boolean }>>
+  getWindowState: () => Promise<IpcResponse<{ expanded: boolean; mode: 'compact' | 'compact-wide' | 'expanded' }>>
+
+  /**
+   * Set window mode (compact, compact-wide, or expanded)
+   * @param mode The window mode to set
+   * @returns Promise resolving to updated window state
+   */
+  setWindowMode: (mode: 'compact' | 'compact-wide' | 'expanded') => Promise<IpcResponse<{ expanded: boolean; mode: 'compact' | 'compact-wide' | 'expanded' }>>
 
   // ============================================================================
   // OpenCode API (Agentic Code Tasks)
@@ -558,6 +565,7 @@ const api: ClipMorphAPI = {
 
   onEvent: (callback) => {
     const handler = (_event: Electron.IpcRendererEvent, data: ClipMorphEvent): void => {
+      console.log('[Preload] Event received:', data.type)
       callback(data)
     }
 
@@ -655,6 +663,8 @@ const api: ClipMorphAPI = {
   // Window control
   toggleWindow: () => ipcRenderer.invoke('clipmorph:window:toggle'),
   getWindowState: () => ipcRenderer.invoke('clipmorph:window:getState'),
+  setWindowMode: (mode: 'compact' | 'compact-wide' | 'expanded') =>
+    ipcRenderer.invoke('clipmorph:window:setMode', { mode }),
 
   // OpenCode API
   runOpenCodeTask: (request: OpenCodeRunTaskRequest) =>

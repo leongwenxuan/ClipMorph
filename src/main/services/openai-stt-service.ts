@@ -158,23 +158,30 @@ class OpenAISttService {
           break
 
         case 'conversation.item.input_audio_transcription.delta':
-          // Partial transcription
+          // Partial transcription (streaming as you speak)
           if (message.delta) {
             this.currentTranscript += message.delta
-            this.transcriptCallback?.({
-              text: this.currentTranscript,
-              isFinal: false,
-            })
+            const fullText = this.allTranscripts.length > 0 
+              ? this.allTranscripts.join(' ') + ' ' + this.currentTranscript
+              : this.currentTranscript
+            console.log('[OpenAI-STT] Live transcript:', fullText)
+            if (this.transcriptCallback) {
+              console.log('[OpenAI-STT] Calling transcript callback...')
+              this.transcriptCallback({ text: fullText, isFinal: false })
+            } else {
+              console.log('[OpenAI-STT] WARNING: No transcript callback set!')
+            }
           }
           break
 
         case 'conversation.item.input_audio_transcription.completed':
           // Final transcription for this segment
           const finalText = message.transcript || this.currentTranscript
-          console.log('[OpenAI-STT] Transcription completed:', finalText)
+          console.log('[OpenAI-STT] Transcription segment completed:', finalText)
           // Accumulate all transcripts
           if (finalText.trim()) {
             this.allTranscripts.push(finalText.trim())
+            console.log('[OpenAI-STT] Accumulated transcripts:', this.allTranscripts.length, 'segments, total:', this.allTranscripts.join(' '))
           }
           // Send the accumulated transcript
           this.transcriptCallback?.({
@@ -185,11 +192,11 @@ class OpenAISttService {
           break
 
         case 'input_audio_buffer.speech_started':
-          console.log('[OpenAI-STT] Speech started')
+          console.log('[OpenAI-STT] Speech started (VAD detected voice)')
           break
 
         case 'input_audio_buffer.speech_stopped':
-          console.log('[OpenAI-STT] Speech stopped')
+          console.log('[OpenAI-STT] Speech stopped (VAD detected silence)')
           break
 
         case 'input_audio_buffer.committed':
@@ -201,7 +208,8 @@ class OpenAISttService {
           break
 
         default:
-          // Ignore other message types
+          // Log unknown message types to see what we're receiving
+          console.log('[OpenAI-STT] Unknown event type:', message.type)
           break
       }
     } catch (error) {

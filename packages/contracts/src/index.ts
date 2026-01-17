@@ -349,6 +349,9 @@ export const EventTypes = {
   SKILL_APPLIED: 'skill-applied',
   SKILL_IMPORTED: 'skill-imported',
   SKILL_EXPORTED: 'skill-exported',
+  // Window events
+  APP_BLUR: 'app-blur',
+  APP_FOCUS: 'app-focus',
 } as const
 
 export type EventType = (typeof EventTypes)[keyof typeof EventTypes]
@@ -366,6 +369,9 @@ export interface JobEventPayload {
 export interface VoiceTranscriptPayload {
   text: string
   isFinal: boolean
+  isPartial?: boolean
+  isExecuting?: boolean
+  isDone?: boolean
 }
 
 export interface VoiceStateResponse {
@@ -499,6 +505,10 @@ export interface ClipboardChangedPayload {
 export interface ClipboardReadResponse {
   text: string
   snapshot: ClipboardSnapshot
+  /** File paths if files were copied (e.g., from Finder) */
+  filePaths?: string[]
+  /** Available clipboard formats */
+  formats?: string[]
 }
 
 export interface ClipboardWriteRequest {
@@ -626,7 +636,7 @@ export interface SettingsChangedPayload {
 // Secrets Types (API Keys via Keychain)
 // ============================================================================
 
-export type SecretKey = 'openai-api-key' | 'anthropic-api-key' | 'cerebras-api-key'
+export type SecretKey = 'openai-api-key' | 'anthropic-api-key' | 'cerebras-api-key' | 'google-api-key' | 'xai-api-key' | 'zai-api-key' | 'groq-api-key' | 'elevenlabs-api-key'
 
 export interface SecretsGetRequest {
   key: SecretKey

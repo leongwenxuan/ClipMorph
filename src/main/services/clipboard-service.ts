@@ -240,52 +240,58 @@ export class ClipboardService {
    * Returns array of file paths, or empty array if no files
    */
   readFilePaths(): string[] {
+    const formats = this.getAvailableFormats()
+    
+    // Method 1: Try NSFilenamesPboardType (macOS Finder copy)
+    // This is stored as an XML plist containing an array of file paths
     try {
-      // On macOS, copied files are available via read('NSFilenamesPboardType')
-      // Electron's clipboard.read() can access this
       const buffer = clipboard.readBuffer('NSFilenamesPboardType')
       if (buffer && buffer.length > 0) {
-        // NSFilenamesPboardType is a plist, but we can also try readBookmark
-        // Actually, let's try the simpler approach: clipboard.readText() sometimes has the path
-        // But more reliably, we can check for file:// URLs
+        const plistStr = buffer.toString('utf8')
+        
+        // Parse XML plist - extract <string> elements which contain the paths
+        // Format: <string>/path/to/file</string>
+        const stringMatches = plistStr.match(/<string>([^<]+)<\/string>/g)
+        if (stringMatches && stringMatches.length > 0) {
+          const paths = stringMatches
+            .map(match => {
+              const innerMatch = match.match(/<string>([^<]+)<\/string>/)
+              return innerMatch ? innerMatch[1] : null
+            })
+            .filter((p): p is string => p !== null && p.startsWith('/'))
+          
+          if (paths.length > 0) {
+            return paths
+          }
+        }
       }
-    } catch {
-      // Not available
+    } catch (err) {
+      // Not available or parsing failed
+      console.log('[Clipboard] NSFilenamesPboardType parse failed:', err)
     }
 
-    // Try reading as file URLs (works on macOS when files are copied)
+    // Method 2: Try public.file-url format (single file)
     try {
-      // macOS stores copied files as file:// URLs in 'public.file-url' format
-      const text = clipboard.readText()
-      
-      // Check if clipboard has file paths (macOS Finder copies paths as text sometimes)
-      if (text && (text.startsWith('/') || text.startsWith('~'))) {
-        // Could be a file path pasted as text
-        const lines = text.split('\n').filter(line => line.trim())
-        const filePaths = lines.filter(line => 
-          line.startsWith('/') || line.startsWith('~')
-        )
-        if (filePaths.length > 0) {
-          return filePaths
+      if (formats.includes('public.file-url')) {
+        const fileUrl = clipboard.read('public.file-url')
+        if (fileUrl && fileUrl.startsWith('file://')) {
+          const path = decodeURIComponent(fileUrl.replace('file://', ''))
+          return [path]
         }
       }
     } catch {
       // Not available
     }
 
-    // Try reading bookmark data (another macOS format for files)
+    // Method 3: Try text/uri-list (standard format)
     try {
-      // Check available formats
-      const formats = clipboard.availableFormats()
-      
-      // Look for file-related formats
       if (formats.includes('text/uri-list')) {
         const uriList = clipboard.read('text/uri-list')
         if (uriList) {
           const paths = uriList
             .split('\n')
-            .filter(line => line.startsWith('file://'))
-            .map(uri => decodeURIComponent(uri.replace('file://', '')))
+            .filter(line => line.trim() && line.startsWith('file://'))
+            .map(uri => decodeURIComponent(uri.replace('file://', '').trim()))
           if (paths.length > 0) {
             return paths
           }
@@ -295,7 +301,35 @@ export class ClipboardService {
       // Not available
     }
 
+    // Method 4: Check if plain text looks like file paths
+    try {
+      const text = clipboard.readText()
+      if (text && (text.startsWith('/') || text.startsWith('~'))) {
+        const lines = text.split('\n').filter(line => line.trim())
+        const filePaths = lines.filter(line => 
+          (line.startsWith('/') || line.startsWith('~')) && 
+          line.length < 1000
+        )
+        if (filePaths.length > 0) {
+          return filePaths
+        }
+      }
+    } catch {
+      // Not available
+    }
+
     return []
+  }
+
+  /**
+   * Get available clipboard formats
+   */
+  getAvailableFormats(): string[] {
+    try {
+      return clipboard.availableFormats()
+    } catch {
+      return []
+    }
   }
 
   /**

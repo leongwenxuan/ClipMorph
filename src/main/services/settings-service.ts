@@ -38,6 +38,10 @@ export interface AppSettings {
     minCaptureDuration: number
     inputDevice: string
   }
+  opencode: {
+    provider: string
+    model: string
+  }
 }
 
 // Re-export the payload type from contracts

@@ -11,6 +11,8 @@ import { randomUUID } from 'crypto'
 import { execSync, exec } from 'child_process'
 import { promisify } from 'util'
 import * as pty from 'node-pty'
+import * as fs from 'fs'
+import * as path from 'path'
 import {
   JobStatus,
   OpenCodeState,
@@ -27,6 +29,9 @@ import {
   OpenCodeFailedPayload,
   OpenCodeCancelledPayload,
 } from '../../../packages/contracts/src'
+import { app } from 'electron'
+import { settingsService } from './settings-service'
+import { secretsService } from './secrets-service'
 
 const execAsync = promisify(exec)
 
@@ -223,6 +228,23 @@ class OpenCodeSidecar extends EventEmitter {
     this.outputBuffer = ''
 
     const startTime = Date.now()
+    console.log('[OpenCode Sidecar] runTask called with prompt:', request.prompt.slice(0, 100))
+
+    // Get provider setting for auth configuration
+    const selectedProvider = (settingsService.get('opencode.provider') as string) || 'anthropic'
+    console.log('[OpenCode Sidecar] Provider for auth:', selectedProvider)
+
+    // Configure OpenCode authentication by writing API key to auth.json BEFORE spawning
+    const opencodeConfigDir = path.join(app.getPath('userData'), 'opencode-config')
+    console.log('[OpenCode Sidecar] Configuring auth in:', opencodeConfigDir)
+    
+    try {
+      await this.configureOpenCodeAuth(opencodeConfigDir, selectedProvider)
+      console.log('[OpenCode Sidecar] Auth configured successfully')
+    } catch (authError) {
+      console.error('[OpenCode Sidecar] Auth configuration failed:', authError)
+      // Continue anyway - OpenCode might have its own auth
+    }
 
     return new Promise((resolve, reject) => {
       this.taskTimeout = setTimeout(() => {
@@ -243,24 +265,42 @@ class OpenCodeSidecar extends EventEmitter {
         // This handles interactive prompts, ANSI codes, and terminal sizing
         // Note: node-pty is a native module that may crash if not rebuilt for Electron
         // Run: npx electron-rebuild -f -w node-pty
-        
+
         // Build args - use "run" subcommand for non-interactive execution
         // Format: opencode run "prompt message"
         const args = ['run', request.prompt]
-        
+
+        // Add model selection from settings
+        // OpenCode uses its own model format: opencode/model-name
+        // Available models: opencode/big-pickle, opencode/glm-4.7-free, opencode/gpt-5-nano, etc.
+        const opencodeModel = settingsService.get('opencode.model') as string | undefined
+        if (opencodeModel && opencodeModel.startsWith('opencode/')) {
+          // Only use model flag if it's in OpenCode format
+          args.push('--model', opencodeModel)
+          console.log('[OpenCode] Using model:', opencodeModel)
+        } else {
+          // Let OpenCode use its default model
+          console.log('[OpenCode] Using default model (settings model not compatible:', opencodeModel, ')')
+        }
+
         // Check if user wants auto-approve mode (dangerous but fully agentic)
         // TODO: Make this configurable in settings
         const autoApprove = process.env.OPENCODE_AUTO_APPROVE === 'true'
         if (autoApprove) {
           args.push('--yes') // Auto-approve all operations
         }
-        
-        // Use ClipMorph's app data directory for OpenCode config to avoid ~/.config permission issues
-        const { app } = require('electron')
-        const opencodeConfigDir = require('path').join(app.getPath('userData'), 'opencode-config')
-        
-        console.log('[OpenCode] Starting:', this.binaryPath, args.join(' '))
+
+        console.log('[OpenCode] ========== SPAWNING OPENCODE ==========')
+        console.log('[OpenCode] Binary:', this.binaryPath)
+        console.log('[OpenCode] Args:', JSON.stringify(args))
         console.log('[OpenCode] Working directory:', request.cwd || process.cwd())
+        console.log('[OpenCode] Config dir:', opencodeConfigDir)
+        
+        // Verify binary exists
+        if (!fs.existsSync(this.binaryPath)) {
+          throw new Error(`OpenCode binary not found at: ${this.binaryPath}`)
+        }
+        console.log('[OpenCode] Binary exists, spawning PTY...')
         
         this.ptyProcess = pty.spawn(this.binaryPath, args, {
           name: 'xterm-256color',
@@ -278,14 +318,19 @@ class OpenCodeSidecar extends EventEmitter {
           } as Record<string, string>,
         })
 
+        console.log('[OpenCode] PTY process spawned with PID:', this.ptyProcess.pid)
+
         // Handle PTY data (combined stdout/stderr in PTY)
         this.ptyProcess.onData((data: string) => {
           this.outputBuffer += data
           
-          // Log OpenCode output for debugging
+          // Log OpenCode output for debugging (including raw for visibility)
           const cleanData = data.replace(/\x1b\[[0-9;]*m/g, '').trim() // Strip ANSI codes
           if (cleanData) {
-            console.log('[OpenCode]', cleanData)
+            console.log('[OpenCode OUTPUT]', cleanData)
+          } else if (data.trim()) {
+            // Log raw if only ANSI codes
+            console.log('[OpenCode RAW]', JSON.stringify(data.slice(0, 200)))
           }
 
           const chunk: OutputChunk = {
@@ -315,7 +360,12 @@ class OpenCodeSidecar extends EventEmitter {
           const durationMs = Date.now() - startTime
           const success = exitCode === 0
           
-          console.log(`[OpenCode] Process exited with code ${exitCode} (${durationMs}ms)`)
+          console.log('[OpenCode] ========== PROCESS EXITED ==========')
+          console.log(`[OpenCode] Exit code: ${exitCode}, Signal: ${signal}, Duration: ${durationMs}ms`)
+          console.log('[OpenCode] Total output length:', this.outputBuffer.length)
+          if (!success && this.outputBuffer) {
+            console.log('[OpenCode] Last 500 chars of output:', this.outputBuffer.slice(-500))
+          }
 
           const result: OpenCodeTaskResult = {
             success,
@@ -408,6 +458,67 @@ class OpenCodeSidecar extends EventEmitter {
   }
 
   private lastPermissionPrompt = ''
+
+  /**
+   * Configure OpenCode authentication by writing API key to auth.json
+   * Maps provider names to OpenCode's expected format
+   */
+  private async configureOpenCodeAuth(configDir: string, provider: string): Promise<void> {
+    try {
+      // Map ClipMorph provider names to OpenCode provider names
+      const providerMap: Record<string, string> = {
+        'anthropic': 'anthropic',
+        'openai': 'openai',
+        'google': 'google',
+        'xai': 'x-ai',
+        'zai': 'z-ai'
+      }
+
+      const opencodeProvider = providerMap[provider] || provider
+
+      // Get the API key from secrets service
+      const secretKey = `${provider}-api-key` as any
+      const apiKey = await secretsService.getSecret(secretKey)
+
+      if (!apiKey) {
+        console.warn(`[OpenCode] No API key found for provider: ${provider}`)
+        return
+      }
+
+      // Ensure config directory exists
+      if (!fs.existsSync(configDir)) {
+        fs.mkdirSync(configDir, { recursive: true })
+      }
+
+      // OpenCode expects auth.json at ~/.local/share/opencode/auth.json
+      // But we're using a custom config dir, so we create it there
+      const authFilePath = path.join(configDir, 'auth.json')
+
+      // Read existing auth.json or create new one
+      let authData: Record<string, any> = {}
+      if (fs.existsSync(authFilePath)) {
+        try {
+          const content = fs.readFileSync(authFilePath, 'utf-8')
+          authData = JSON.parse(content)
+        } catch (err) {
+          console.warn('[OpenCode] Failed to parse existing auth.json, creating new one')
+        }
+      }
+
+      // Update the provider's API key
+      authData[opencodeProvider] = {
+        apiKey: apiKey
+      }
+
+      // Write updated auth.json
+      fs.writeFileSync(authFilePath, JSON.stringify(authData, null, 2), 'utf-8')
+      console.log(`[OpenCode] Configured API key for provider: ${opencodeProvider}`)
+
+    } catch (err) {
+      console.error('[OpenCode] Failed to configure authentication:', err)
+      // Don't throw - let OpenCode handle missing auth
+    }
+  }
 
   /**
    * Detect permission prompts in OpenCode output
@@ -557,7 +668,9 @@ export class OpenCodeService extends EventEmitter {
             jobId: this.activeJob.id,
           },
         }
+        // Emit to renderer
         this.emit('event', createEvent(EventTypes.OPENCODE_OUTPUT, payload, this.activeJob.id))
+        console.log('[OpenCodeService] Emitted OPENCODE_OUTPUT event, chunk size:', chunk.data.length)
       }
     })
 
@@ -731,7 +844,11 @@ export class OpenCodeService extends EventEmitter {
     }
 
     // Run task in background
-    this.sidecar.runTask(taskRequest).catch((error) => {
+    console.log('[OpenCodeService] Starting sidecar.runTask...')
+    this.sidecar.runTask(taskRequest).then((result) => {
+      console.log('[OpenCodeService] Sidecar task completed:', result.success ? 'success' : 'failed')
+    }).catch((error) => {
+      console.error('[OpenCodeService] Sidecar task error:', error.message)
       if (this.activeJob && this.activeJob.id === job.id) {
         this.activeJob.status = 'failed'
         this.activeJob.error = error.message

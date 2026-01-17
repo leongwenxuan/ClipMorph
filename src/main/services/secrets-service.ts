@@ -12,7 +12,7 @@ import keytar from 'keytar'
 const SERVICE_NAME = 'ClipMorph'
 
 // Known secret keys
-export type SecretKey = 'openai-api-key' | 'anthropic-api-key' | 'cerebras-api-key'
+export type SecretKey = 'openai-api-key' | 'anthropic-api-key' | 'cerebras-api-key' | 'groq-api-key' | 'elevenlabs-api-key'
 
 class SecretsService {
   /**
@@ -90,6 +90,48 @@ class SecretsService {
    */
   async hasCerebrasKey(): Promise<boolean> {
     return this.hasSecret('cerebras-api-key')
+  }
+
+  /**
+   * Get Groq API key specifically
+   */
+  async getGroqKey(): Promise<string | null> {
+    return this.getSecret('groq-api-key')
+  }
+
+  /**
+   * Set Groq API key specifically
+   */
+  async setGroqKey(apiKey: string): Promise<void> {
+    return this.setSecret('groq-api-key', apiKey)
+  }
+
+  /**
+   * Check if Groq API key is configured
+   */
+  async hasGroqKey(): Promise<boolean> {
+    return this.hasSecret('groq-api-key')
+  }
+
+  /**
+   * Get ElevenLabs API key specifically
+   */
+  async getElevenLabsKey(): Promise<string | null> {
+    return this.getSecret('elevenlabs-api-key')
+  }
+
+  /**
+   * Set ElevenLabs API key specifically
+   */
+  async setElevenLabsKey(apiKey: string): Promise<void> {
+    return this.setSecret('elevenlabs-api-key', apiKey)
+  }
+
+  /**
+   * Check if ElevenLabs API key is configured
+   */
+  async hasElevenLabsKey(): Promise<boolean> {
+    return this.hasSecret('elevenlabs-api-key')
   }
 }
 

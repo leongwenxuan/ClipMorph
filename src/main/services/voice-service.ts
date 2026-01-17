@@ -21,7 +21,12 @@ import { checkMicrophonePermission } from './permission-service'
 import { storeService } from './store-service'
 import { intentService } from './intent-service'
 import { openaiSttService } from './openai-stt-service'
+import { groqSttService } from './groq-stt-service'
+import { elevenLabsSttService } from './elevenlabs-stt-service'
 import { settingsService } from './settings-service'
+
+// STT Provider type
+type SttProvider = 'elevenlabs' | 'groq' | 'openai'
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const record = require('node-record-lpcm16')
 
@@ -103,6 +108,7 @@ interface AudioCaptureState {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   recording: any | null
   pendingTranscript: string
+  audioChunks: Buffer[] // Buffer audio for Groq
 }
 
 class VoiceService {
@@ -115,6 +121,7 @@ class VoiceService {
     startTime: null,
     recording: null,
     pendingTranscript: '',
+    audioChunks: [],
   }
 
   // Status callback for app status updates
@@ -192,6 +199,8 @@ class VoiceService {
     openaiSttService.onTranscript((result) => {
       this.captureState.pendingTranscript = result.text
 
+      console.log(`[VoiceService] Emitting transcript to UI: "${result.text}" (isFinal: ${result.isFinal})`)
+      
       // Emit partial transcript for UI feedback
       this.emit(
         createEvent<VoiceTranscriptPayload>(EventTypes.VOICE_TRANSCRIPT, {
@@ -199,7 +208,6 @@ class VoiceService {
           isFinal: result.isFinal,
         })
       )
-
     })
 
     const connected = await openaiSttService.connect(forceReconnect)
@@ -317,6 +325,7 @@ class VoiceService {
       startTime: Date.now(),
       recording: null,
       pendingTranscript: '',
+      audioChunks: [], // Reset audio buffer for Groq
     }
 
     // Update app status to listening
@@ -327,11 +336,20 @@ class VoiceService {
 
     console.log('[VoiceService] Audio capture started')
 
-    // Clear any previous audio buffer
-    openaiSttService.clearAudio()
+    // Determine which STT provider to use (priority: ElevenLabs > Groq > OpenAI)
+    const sttProvider = await this.getSttProvider()
+    console.log(`[VoiceService] Using ${sttProvider} for transcription`)
+
+    // Set up provider-specific handling
+    if (sttProvider === 'elevenlabs') {
+      await this.setupElevenLabsStreaming()
+    } else {
+      // Clear any previous audio buffer (for OpenAI live preview)
+      openaiSttService.clearAudio()
+    }
 
     // Start recording from microphone using node-record-lpcm16
-    // Output: 16-bit PCM, 16kHz mono (required by OpenAI Realtime API)
+    // Output: 16-bit PCM, 16kHz mono
     try {
       // Get configured input device (empty = system default)
       const inputDevice = settingsService.get('audio.inputDevice')
@@ -341,6 +359,7 @@ class VoiceService {
         channels: 1,
         audioType: 'raw', // raw PCM, no WAV header
         recorder: 'sox',
+        verbose: true, // Enable verbose logging
       }
       
       // Only set device if configured
@@ -349,22 +368,152 @@ class VoiceService {
         console.log(`[VoiceService] Using audio device: ${inputDevice}`)
       }
       
+      console.log('[VoiceService] Starting sox recording with options:', JSON.stringify(recordOptions))
       const recording = record.record(recordOptions)
 
       this.captureState.recording = recording
 
-      // Stream audio chunks directly to OpenAI
+      // Stream audio chunks
+      let chunkCount = 0
+      let totalBytes = 0
       recording.stream().on('data', (chunk: Buffer) => {
         if (this.captureState.isCapturing) {
-          openaiSttService.sendAudioBuffer(chunk)
+          chunkCount++
+          totalBytes += chunk.length
+          
+          // Always buffer audio for Groq (final transcription fallback)
+          this.captureState.audioChunks.push(chunk)
+          
+          if (chunkCount === 1) {
+            console.log(`[VoiceService] First audio chunk received: ${chunk.length} bytes`)
+          } else if (chunkCount % 50 === 0) {
+            console.log(`[VoiceService] Audio chunk #${chunkCount}, total: ${totalBytes} bytes`)
+          }
+          
+          // Route audio to the appropriate STT service
+          if (sttProvider === 'elevenlabs') {
+            elevenLabsSttService.sendAudioChunk(chunk)
+          } else if (sttProvider === 'openai') {
+            openaiSttService.sendAudioBuffer(chunk)
+          }
+          // For Groq, we just buffer (processed on stop)
         }
       })
 
       recording.stream().on('error', (err: Error) => {
-        console.error('[VoiceService] Recording error:', err)
+        console.error('[VoiceService] Recording stream error:', err)
+      })
+
+      recording.stream().on('end', () => {
+        console.log(`[VoiceService] Recording stream ended. Total chunks: ${chunkCount}, total bytes: ${totalBytes}`)
       })
     } catch (err) {
       console.error('[VoiceService] Failed to start recording:', err)
+    }
+  }
+
+  /**
+   * Determine which STT provider to use
+   */
+  private async getSttProvider(): Promise<SttProvider> {
+    // Check user preference from settings
+    const preferredProvider = settingsService.get('voice.sttProvider')
+    
+    if (preferredProvider === 'elevenlabs' && await elevenLabsSttService.hasApiKey()) {
+      return 'elevenlabs'
+    }
+    if (preferredProvider === 'groq' && await groqSttService.hasApiKey()) {
+      return 'groq'
+    }
+    
+    // Auto-detect based on available keys (ElevenLabs > Groq > OpenAI)
+    if (await elevenLabsSttService.hasApiKey()) {
+      return 'elevenlabs'
+    }
+    if (await groqSttService.hasApiKey()) {
+      return 'groq'
+    }
+    return 'openai'
+  }
+
+  /**
+   * Set up ElevenLabs streaming with live transcript updates and auto-execute
+   */
+  private async setupElevenLabsStreaming(): Promise<void> {
+    // Set up transcript callback for live updates
+    elevenLabsSttService.onTranscript((result) => {
+      this.captureState.pendingTranscript = result.text
+      
+      console.log(`[VoiceService] ElevenLabs transcript: "${result.text}" (final: ${result.isFinal})`)
+      
+      // Emit live transcript for UI display
+      this.emit(
+        createEvent<VoiceTranscriptPayload>(EventTypes.VOICE_TRANSCRIPT, {
+          text: result.text,
+          isFinal: result.isFinal,
+        })
+      )
+    })
+
+    // Set up auto-execute callback (silence triggered)
+    // IMPORTANT: Keep recording active - only stop when user presses hotkey
+    elevenLabsSttService.onExecute(async (transcript, reason) => {
+      console.log(`[VoiceService] Auto-execute triggered by ${reason}: "${transcript}"`)
+      
+      // Show processing status but DON'T stop recording
+      this.setAppStatus('processing')
+      
+      // Emit transcript showing what's being executed
+      this.emit(
+        createEvent<VoiceTranscriptPayload>(EventTypes.VOICE_TRANSCRIPT, {
+          text: transcript,
+          isFinal: false,
+          isExecuting: true, // New flag to indicate execution in progress
+        })
+      )
+      
+      // Store and route to intent service
+      const startTime = this.captureState.startTime
+      const duration = startTime ? Date.now() - startTime : 0
+      this.storeTranscript(transcript, startTime, duration)
+      
+      const routingResult = await intentService.routeTranscript(transcript)
+      console.log(`[VoiceService] Auto-execute intent result:`, routingResult)
+      
+      // Show "Done!" briefly before going back to listening
+      this.emit(
+        createEvent<VoiceTranscriptPayload>(EventTypes.VOICE_TRANSCRIPT, {
+          text: '✓ Done! Ready for next command...',
+          isFinal: false,
+          isDone: true, // New flag for done state
+        })
+      )
+      
+      // Clear transcripts for next command
+      elevenLabsSttService.clearTranscripts()
+      
+      // After a brief delay, go back to listening state
+      setTimeout(() => {
+        if (this.captureState.isCapturing) {
+          this.setAppStatus('listening')
+          this.emit(
+            createEvent<VoiceTranscriptPayload>(EventTypes.VOICE_TRANSCRIPT, {
+              text: '',
+              isFinal: false,
+            })
+          )
+        }
+      }, 1500) // Show "Done!" for 1.5 seconds
+    })
+
+    // Apply noise suppression setting
+    const noiseSuppression = await storeService.getSetting('voice.noiseSuppression')
+    elevenLabsSttService.setNoiseSuppression(noiseSuppression === 'true')
+    
+    // Connect to ElevenLabs
+    const connected = await elevenLabsSttService.startListening()
+    if (!connected) {
+      console.error('[VoiceService] Failed to connect to ElevenLabs STT')
     }
   }
 
@@ -378,6 +527,7 @@ class VoiceService {
       ? Date.now() - this.captureState.startTime
       : 0
     const startTime = this.captureState.startTime
+    const audioChunks = this.captureState.audioChunks
 
     // Stop the recording
     if (this.captureState.recording) {
@@ -403,21 +553,55 @@ class VoiceService {
     // Update status to processing
     this.setAppStatus('processing')
 
-    // Commit the audio buffer to signal end of input
-    // This forces OpenAI to finalize any pending transcription
-    openaiSttService.commitAudio()
+    // Emit processing status
+    this.emit(
+      createEvent<VoiceTranscriptPayload>(EventTypes.VOICE_TRANSCRIPT, {
+        text: '⏳ Transcribing...',
+        isFinal: false,
+      })
+    )
 
-    // Wait for transcription to complete (longer wait to ensure we get the result)
-    await new Promise(resolve => setTimeout(resolve, 2000))
+    let transcriptText: string | null = null
+    const sttProvider = await this.getSttProvider()
 
-    // Get the full accumulated transcript
-    const transcriptText = openaiSttService.getFullTranscript() || this.captureState.pendingTranscript
+    // Get transcript based on provider
+    if (sttProvider === 'elevenlabs') {
+      // ElevenLabs: get the accumulated transcript from streaming
+      transcriptText = elevenLabsSttService.stopListening()
+      console.log(`[VoiceService] ElevenLabs final transcript: "${transcriptText}"`)
+    } else if (sttProvider === 'groq' && audioChunks.length > 0) {
+      // Groq: send buffered audio for transcription
+      try {
+        const audioBuffer = Buffer.concat(audioChunks)
+        console.log(`[VoiceService] Sending ${audioBuffer.length} bytes to Groq Whisper...`)
+        
+        const result = await groqSttService.transcribe(audioBuffer, duration)
+        transcriptText = result.text
+        console.log(`[VoiceService] Groq transcript: "${transcriptText}"`)
+      } catch (err) {
+        console.error('[VoiceService] Groq transcription failed, falling back to OpenAI:', err)
+        // Fall through to OpenAI fallback
+      }
+    }
 
-    if (transcriptText) {
+    // Fallback to OpenAI Realtime if nothing else worked
+    if (!transcriptText) {
+      // Commit the audio buffer to signal end of input
+      openaiSttService.commitAudio()
+
+      // Wait for transcription to complete
+      const waitTime = Math.min(5000, Math.max(2000, duration / 5))
+      console.log(`[VoiceService] Waiting ${waitTime}ms for OpenAI transcription...`)
+      await new Promise(resolve => setTimeout(resolve, waitTime))
+
+      transcriptText = openaiSttService.getFullTranscript() || this.captureState.pendingTranscript
+    }
+
+    if (transcriptText && transcriptText.trim().length > 0) {
       console.log(`[VoiceService] Final transcript: "${transcriptText}"`)
 
       // Store transcript
-      const record = this.storeTranscript(transcriptText, startTime, duration)
+      this.storeTranscript(transcriptText, startTime, duration)
 
       // Emit final transcript event
       this.emit(
@@ -428,22 +612,17 @@ class VoiceService {
       )
 
       // Route to intent service
-      if (transcriptText.length > 0) {
-        const routingResult = await intentService.routeTranscript(transcriptText)
-        console.log(`[VoiceService] Intent routing result:`, routingResult)
-      }
+      const routingResult = await intentService.routeTranscript(transcriptText)
+      console.log(`[VoiceService] Intent routing result:`, routingResult)
     } else {
-      // Use whatever partial transcript we have
-      const fallbackText = this.captureState.pendingTranscript || '[No transcription received]'
-      console.log(`[VoiceService] Using fallback transcript: "${fallbackText}"`)
-
-      if (fallbackText && fallbackText !== '[No transcription received]') {
-        this.storeTranscript(fallbackText, startTime, duration)
-
-        // Route to intent service
-        const routingResult = await intentService.routeTranscript(fallbackText)
-        console.log(`[VoiceService] Intent routing result:`, routingResult)
-      }
+      // No transcription received
+      console.log(`[VoiceService] No transcription received`)
+      this.emit(
+        createEvent<VoiceTranscriptPayload>(EventTypes.VOICE_TRANSCRIPT, {
+          text: '[No speech detected]',
+          isFinal: true,
+        })
+      )
     }
 
     this.resetCaptureState()
@@ -549,6 +728,7 @@ class VoiceService {
       startTime: null,
       recording: null,
       pendingTranscript: '',
+      audioChunks: [],
     }
   }
 

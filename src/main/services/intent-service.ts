@@ -396,9 +396,12 @@ class IntentService {
     }
 
     // Write result to clipboard with snapshot gating
+    console.log(`[IntentService] Writing result to clipboard (${result.output.length} chars)`)
     const writeResult = clipboardService.writeClipboardGated(result.output, snapshot.id)
+    console.log(`[IntentService] Write result: success=${writeResult.success}`)
 
     if (!writeResult.success) {
+      console.log(`[IntentService] Clipboard write failed: ${writeResult.error?.message}`)
       jobManager.failJob(job.id, {
         code: writeResult.error.code,
         message: writeResult.error.message,
@@ -816,6 +819,8 @@ class IntentService {
     console.log(`[IntentService] Starting OpenCode task for intent ${intent}: "${classification.rawTranscript}"`)
     console.log(`[IntentService] Working directory: ${opencodeCwd}`)
 
+    const startTime = Date.now()
+    
     try {
       // Run the OpenCode task
       const result = await openCodeService.runTask({
@@ -828,6 +833,16 @@ class IntentService {
 
       this.updateLastAction(classification.rawTranscript, intent, true, result.jobId)
 
+      // Log successful operation start to history
+      storeService.addOperation({
+        id: result.jobId,
+        command: classification.rawTranscript,
+        jobType: intent,
+        inputText: context || clipboardText,
+        success: true,
+        durationMs: Date.now() - startTime,
+      })
+
       return {
         intent,
         classification,
@@ -839,6 +854,17 @@ class IntentService {
       console.error(`[IntentService] OpenCode task failed:`, errorMsg)
 
       this.updateLastAction(classification.rawTranscript, intent, false, undefined, errorMsg)
+
+      // Log failed operation to history
+      storeService.addOperation({
+        id: `opencode-failed-${Date.now()}`,
+        command: classification.rawTranscript,
+        jobType: intent,
+        inputText: context || clipboardText,
+        success: false,
+        error: errorMsg,
+        durationMs: Date.now() - startTime,
+      })
 
       return {
         intent,

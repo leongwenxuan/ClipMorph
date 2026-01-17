@@ -1,5 +1,23 @@
 import { useState, useEffect, useCallback } from 'react'
 import { isIpcSuccess, OperationHistoryEntry } from '../../../../packages/contracts/src'
+import { 
+  RefreshCw, 
+  Trash2, 
+  X, 
+  Sparkles, 
+  BarChart3, 
+  Bot, 
+  Code, 
+  Zap, 
+  Check, 
+  XCircle, 
+  Download, 
+  Upload, 
+  Image, 
+  Copy,
+  Clock,
+  Terminal
+} from 'lucide-react'
 import './OperationsHistory.css'
 
 interface OperationsHistoryProps {
@@ -74,13 +92,22 @@ function OperationsHistory({ onClose }: OperationsHistoryProps): JSX.Element {
     return `${mins}m ${secs}s`
   }
 
-  const getJobTypeIcon = (jobType: string): string => {
+  const getJobTypeIcon = (jobType: string): JSX.Element => {
+    const iconProps = { size: 18, className: 'job-type-icon' }
     switch (jobType) {
-      case 'llm-transform': return '✨'
-      case 'chart-render': return '📊'
-      case 'automation': return '🤖'
-      case 'opencode': return '💻'
-      default: return '⚡'
+      case 'llm-transform': return <Sparkles {...iconProps} />
+      case 'chart-render': return <BarChart3 {...iconProps} />
+      case 'automation': return <Bot {...iconProps} />
+      case 'code:generate':
+      case 'code:convert':
+      case 'code:explain':
+      case 'code:debug':
+      case 'code:refactor':
+      case 'code:document':
+      case 'code:test':
+        return <Code {...iconProps} />
+      case 'browser-agent': return <Terminal {...iconProps} />
+      default: return <Zap {...iconProps} />
     }
   }
 
@@ -160,16 +187,16 @@ function OperationsHistory({ onClose }: OperationsHistoryProps): JSX.Element {
     <div className="operations-history-overlay" onClick={onClose}>
       <div className="operations-history-panel" onClick={(e) => e.stopPropagation()}>
         <div className="operations-history-header">
-          <h2>History</h2>
+          <h2><Clock size={18} className="header-icon" /> History</h2>
           <div className="operations-history-actions">
             <button className="refresh-btn" onClick={loadOperations} title="Refresh">
-              🔄
+              <RefreshCw size={16} />
             </button>
             <button className="clear-btn" onClick={handleClear} title="Clear history">
-              🗑️
+              <Trash2 size={16} />
             </button>
             <button className="close-btn" onClick={onClose}>
-              ✕
+              <X size={18} />
             </button>
           </div>
         </div>
@@ -196,7 +223,7 @@ function OperationsHistory({ onClose }: OperationsHistoryProps): JSX.Element {
                     <span className="operation-icon">{getJobTypeIcon(op.job_type)}</span>
                     <span className="operation-command">"{truncate(op.command, 40)}"</span>
                     <span className={`operation-status ${op.success ? 'success' : 'failed'}`}>
-                      {op.success ? '✓' : '✗'}
+                      {op.success ? <Check size={12} /> : <XCircle size={12} />}
                     </span>
                     <span className="operation-time">{formatTime(op.created_at)}</span>
                   </div>
@@ -226,20 +253,20 @@ function OperationsHistory({ onClose }: OperationsHistoryProps): JSX.Element {
                       
                       <div className="operation-io">
                         <div className="io-section">
-                          <div className="io-label">📥 Input (Clipboard):</div>
+                          <div className="io-label"><Download size={14} /> Input (Clipboard):</div>
                           <pre className="io-content">{truncate(op.input_text, 500)}</pre>
                         </div>
                         
                         {op.output_text && (
                           <div className="io-section">
                             <div className="io-label">
-                              📤 Output:
+                              <Upload size={14} /> Output:
                               <button 
                                 className="copy-btn small" 
                                 onClick={(e) => { e.stopPropagation(); handleCopyText(op.output_text!) }}
                                 title="Copy output to clipboard"
                               >
-                                📋
+                                <Copy size={12} />
                               </button>
                             </div>
                             <pre className="io-content">{truncate(op.output_text, 500)}</pre>
@@ -249,14 +276,14 @@ function OperationsHistory({ onClose }: OperationsHistoryProps): JSX.Element {
                         {op.output_image_path && (
                           <div className="io-section image-section">
                             <div className="io-label">
-                              🖼️ Image Output ({op.output_image_size ? (op.output_image_size / 1024).toFixed(1) + ' KB' : 'N/A'}):
+                              <Image size={14} /> Image Output ({op.output_image_size ? (op.output_image_size / 1024).toFixed(1) + ' KB' : 'N/A'}):
                               <button 
                                 className={`copy-btn small ${copyingId === op.id ? 'copied' : ''}`}
                                 onClick={(e) => { e.stopPropagation(); handleCopyImage(op.output_image_path!, op.id) }}
                                 title="Copy image to clipboard"
                                 disabled={copyingId === op.id}
                               >
-                                {copyingId === op.id ? '✓' : '📋'}
+                                {copyingId === op.id ? <Check size={12} /> : <Copy size={12} />}
                               </button>
                             </div>
                             <div className="image-preview">

@@ -86,6 +86,7 @@ const api = {
   getAppStatus: () => electron.ipcRenderer.invoke(IpcChannels.STATUS_GET),
   onEvent: (callback) => {
     const handler = (_event, data) => {
+      console.log("[Preload] Event received:", data.type);
       callback(data);
     };
     electron.ipcRenderer.on(IpcChannels.EVENTS, handler);
@@ -130,6 +131,7 @@ const api = {
   // Window control
   toggleWindow: () => electron.ipcRenderer.invoke("clipmorph:window:toggle"),
   getWindowState: () => electron.ipcRenderer.invoke("clipmorph:window:getState"),
+  setWindowMode: (mode) => electron.ipcRenderer.invoke("clipmorph:window:setMode", { mode }),
   // OpenCode API
   runOpenCodeTask: (request) => electron.ipcRenderer.invoke(IpcChannels.OPENCODE_RUN_TASK, request),
   cancelOpenCode: () => electron.ipcRenderer.invoke(IpcChannels.OPENCODE_CANCEL),

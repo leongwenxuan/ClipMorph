@@ -1,56 +1,55 @@
 .operations-history-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(0, 0, 0, 0.6);
+  /* When used inline in expanded app, act as a container */
+  width: 100%;
+  height: 100%;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-  backdrop-filter: blur(4px);
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .operations-history-panel {
-  background: #1a1a2e;
-  border-radius: 12px;
-  width: 90%;
-  max-width: 700px;
-  max-height: 80vh;
+  background: transparent;
+  width: 100%;
+  height: 100%;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  overflow: hidden;
 }
 
 .operations-history-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 16px 20px;
+  padding: 10px 12px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .operations-history-header h2 {
   margin: 0;
-  font-size: 18px;
+  font-size: 14px;
   font-weight: 600;
   color: #fff;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.operations-history-header h2 .header-icon {
+  color: #9ca3af;
 }
 
 .operations-history-actions {
   display: flex;
-  gap: 8px;
+  gap: 6px;
 }
 
 .operations-history-actions button {
   background: transparent;
   border: none;
   cursor: pointer;
-  padding: 6px 10px;
-  border-radius: 6px;
-  font-size: 14px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-size: 12px;
   transition: background 0.2s;
 }
 
@@ -58,20 +57,39 @@
   background: rgba(255, 255, 255, 0.1);
 }
 
-.refresh-btn { color: #3b82f6; }
-.clear-btn { color: #ef4444; }
-.close-btn { color: #9ca3af; font-size: 18px; }
+.refresh-btn { 
+  color: #3b82f6; 
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.clear-btn { 
+  color: #ef4444; 
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.close-btn { 
+  color: #9ca3af; 
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.operations-history-actions button svg {
+  stroke: currentColor;
+}
 
 .operations-history-content {
   flex: 1;
   overflow-y: auto;
-  padding: 12px;
+  padding: 8px 10px;
 }
 
 .operations-loading,
 .operations-empty {
   text-align: center;
-  padding: 40px 20px;
+  padding: 24px 12px;
   color: #9ca3af;
 }
 
@@ -90,7 +108,7 @@
 .operation-item {
   background: rgba(255, 255, 255, 0.03);
   border-radius: 8px;
-  padding: 12px;
+  padding: 12px 14px;
   cursor: pointer;
   transition: background 0.2s;
   border-left: 3px solid transparent;
@@ -115,7 +133,15 @@
 }
 
 .operation-icon {
-  font-size: 16px;
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.operation-icon .job-type-icon {
+  color: #9ca3af;
+  stroke: currentColor;
 }
 
 .operation-command {
@@ -129,18 +155,31 @@
 
 .operation-status {
   font-size: 12px;
-  padding: 2px 6px;
+  padding: 4px 6px;
   border-radius: 4px;
+  flex-shrink: 0;
+  min-width: 24px;
+  min-height: 24px;
 }
 
 .operation-status.success {
   background: rgba(34, 197, 94, 0.2);
   color: #22c55e;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .operation-status.failed {
   background: rgba(239, 68, 68, 0.2);
   color: #ef4444;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.operation-status svg {
+  stroke: currentColor;
 }
 
 .operation-time {
@@ -200,14 +239,27 @@
   gap: 8px;
 }
 
+.io-label svg {
+  stroke: currentColor;
+  flex-shrink: 0;
+}
+
 .copy-btn.small {
   background: rgba(255, 255, 255, 0.1);
   border: none;
   border-radius: 4px;
-  padding: 2px 6px;
+  padding: 4px 6px;
   font-size: 11px;
   cursor: pointer;
   transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #9ca3af;
+}
+
+.copy-btn.small svg {
+  stroke: currentColor;
 }
 
 .copy-btn.small:hover {

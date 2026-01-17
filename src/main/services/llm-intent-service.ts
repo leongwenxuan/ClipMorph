@@ -62,16 +62,23 @@ class LLMIntentService {
 
 Given a user's voice command, classify it into ONE of these intents:
 
-CODE INTENTS (use OpenCode CLI for agentic coding):
-- code:generate - Create new code, functions, components, classes
-- code:refactor - Refactor, restructure, rewrite existing code
-- code:fix - Fix bugs, debug, repair code
-- code:explain - Explain what code does
-- code:improve - Optimize, enhance, make code better
-- code:convert - Convert code to another language (e.g., TypeScript)
+CODE INTENTS (for modifying SOURCE CODE FILES in a project/codebase):
+- code:generate - Create new source code files, functions, classes, components in a codebase
+- code:refactor - Refactor actual source code files
+- code:fix - Fix bugs in source code files
+- code:explain - Explain source code
+- code:improve - Optimize source code files
+- code:convert - Convert source code to another programming language
 
-TRANSFORM INTENTS (use LLM to transform clipboard text):
-- Use "transform" for: summarize, translate, reformat, shorten, expand, clean up text, extract info, etc.
+TRANSFORM INTENTS (for transforming CLIPBOARD DATA - text, tables, numbers):
+- Use "transform" for ALL of these:
+  * Calculations on data (calculate ratios, sum, average, etc.)
+  * Data analysis (analyze, compare, find trends)
+  * Table/spreadsheet operations (format for Excel, create table, add columns)
+  * Text transformations (summarize, translate, reformat, clean up)
+  * Data extraction (extract emails, links, names, etc.)
+  * Number crunching or financial calculations
+  * Converting data formats (CSV to JSON, etc.)
 
 BROWSER INTENTS (automate web browser):
 - automation:portal - Fill forms, click buttons, navigate websites, sign up, log in
@@ -87,9 +94,15 @@ SPECIAL INTENTS:
 - cancel - Cancel current operation
 - undo - Undo last action
 
-If the command is about writing, creating, or modifying CODE/FUNCTIONS/COMPONENTS → use code:* intents
-If the command is about transforming TEXT content → use "transform"
-If unsure, use "transform" as the safe default.
+CRITICAL DISTINCTION:
+- CODE intents are ONLY for modifying actual source code files (.js, .py, .ts, etc.) in a programming project
+- TRANSFORM is for processing/analyzing DATA that is on the clipboard (text, tables, numbers, spreadsheet data)
+- "Calculate X from data" → TRANSFORM (processing data)
+- "Write a function to calculate X" → code:generate (creating source code)
+- "Put data in Excel table format" → TRANSFORM (formatting data)
+- "Create an Excel macro" → code:generate (creating source code)
+
+When in doubt, use "transform". Most voice commands about data manipulation should be "transform".
 
 Respond with JSON only: {"intent": "<intent>", "confidence": <0.0-1.0>, "reasoning": "<brief explanation>"}`
 

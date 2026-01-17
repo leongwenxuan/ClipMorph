@@ -67,7 +67,11 @@ class LLMTransformService {
    * @param html - Optional HTML content (for rich formats like Excel tables)
    */
   async transform(command: string, text: string, html?: string): Promise<LLMTransformResult> {
+    console.log(`[LLMTransformService] Transform called with command: "${command}"`)
+    console.log(`[LLMTransformService] Input text length: ${text?.length || 0}`)
+    
     if (!text || text.trim().length === 0) {
+      console.log('[LLMTransformService] Empty clipboard, returning error')
       return {
         success: false,
         input: text,
@@ -77,7 +81,9 @@ class LLMTransformService {
     }
 
     try {
+      console.log('[LLMTransformService] Getting OpenAI client...')
       const client = await this.getClient()
+      console.log('[LLMTransformService] Client obtained, calling API...')
       const isTabular = this.isTabularContent(text, html)
 
       // Build content to send - prefer HTML for tables as it has structure
@@ -144,8 +150,10 @@ ${contentToTransform}`,
       })
 
       const output = response.choices[0]?.message?.content?.trim()
+      console.log(`[LLMTransformService] API response received, output length: ${output?.length || 0}`)
 
       if (!output) {
+        console.log('[LLMTransformService] Empty response from LLM')
         return {
           success: false,
           input: text,
@@ -154,6 +162,7 @@ ${contentToTransform}`,
         }
       }
 
+      console.log(`[LLMTransformService] Transform successful, output preview: "${output.substring(0, 100)}..."`)
       return {
         success: true,
         input: text,
@@ -162,6 +171,7 @@ ${contentToTransform}`,
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
       console.error('[LLMTransformService] Transform failed:', errorMessage)
+      console.error('[LLMTransformService] Full error:', error)
 
       return {
         success: false,

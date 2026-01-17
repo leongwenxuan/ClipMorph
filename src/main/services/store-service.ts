@@ -56,6 +56,11 @@ export const DEFAULT_SETTINGS = {
   'audio.minCaptureDuration': '200',
   'audio.inputDevice': '', // Empty = system default (macOS uses CoreAudio default)
   'cerebras.model': 'qwen-3-32b', // Cerebras model for browser agent
+  'opencode.provider': 'anthropic', // OpenCode LLM provider
+  'opencode.model': 'claude-3-5-sonnet-20241022', // OpenCode model for selected provider
+  'ui.autoCompactOnBlur': 'true', // Auto-compact when app loses focus
+  'voice.sttProvider': 'auto', // STT provider: 'auto' | 'elevenlabs' | 'groq' | 'openai'
+  'voice.noiseSuppression': 'false', // Filter background noise (ElevenLabs only)
 } as const
 
 // Available Cerebras models
@@ -64,6 +69,54 @@ export const CEREBRAS_MODELS = [
   { id: 'llama-3.3-70b', name: 'Llama 3.3 70B', params: '70B', speed: '~2100 t/s' },
   { id: 'gpt-oss-120b', name: 'OpenAI GPT OSS', params: '120B', speed: '~3000 t/s' },
   { id: 'qwen-3-32b', name: 'Qwen 3 32B', params: '32B', speed: '~2600 t/s' },
+] as const
+
+// Available OpenCode providers and their models
+export const OPENCODE_PROVIDERS = [
+  {
+    id: 'anthropic',
+    name: 'Anthropic (Claude)',
+    models: [
+      { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet', description: 'Recommended - Best balance' },
+      { id: 'claude-3-opus-20240229', name: 'Claude 3 Opus', description: 'Most capable' },
+      { id: 'claude-3-haiku-20240307', name: 'Claude 3 Haiku', description: 'Fastest' },
+    ]
+  },
+  {
+    id: 'openai',
+    name: 'OpenAI',
+    models: [
+      { id: 'gpt-4o', name: 'GPT-4o', description: 'Latest multimodal model' },
+      { id: 'gpt-4o-mini', name: 'GPT-4o Mini', description: 'Faster, cheaper' },
+      { id: 'o1', name: 'o1', description: 'Advanced reasoning' },
+      { id: 'o1-mini', name: 'o1 Mini', description: 'Faster reasoning' },
+    ]
+  },
+  {
+    id: 'google',
+    name: 'Google',
+    models: [
+      { id: 'gemini-2.0-flash-exp', name: 'Gemini 2.0 Flash', description: 'Experimental preview' },
+      { id: 'gemini-1.5-pro-002', name: 'Gemini 1.5 Pro', description: 'Most capable' },
+      { id: 'gemini-1.5-flash-002', name: 'Gemini 1.5 Flash', description: 'Fastest' },
+    ]
+  },
+  {
+    id: 'xai',
+    name: 'xAI',
+    models: [
+      { id: 'grok-2-1212', name: 'Grok 2', description: 'Latest model' },
+      { id: 'grok-2-vision-1212', name: 'Grok 2 Vision', description: 'With vision capabilities' },
+    ]
+  },
+  {
+    id: 'zai',
+    name: 'Z.AI (GLM)',
+    models: [
+      { id: 'glm-4.7', name: 'GLM-4.7', description: 'GLM Coding Plan model' },
+      { id: 'glm-4.6', name: 'GLM-4.6', description: 'Previous generation' },
+    ]
+  },
 ] as const
 
 export type SettingKey = keyof typeof DEFAULT_SETTINGS
@@ -337,6 +390,7 @@ class StoreService {
       operation.durationMs ?? null,
       Date.now()
     )
+    console.log(`[StoreService] Added operation: "${operation.command}" (${operation.jobType}) - ${operation.success ? 'success' : 'failed'}`)
 
     // Delete old operations (keep last 100)
     const deleteStmt = this.db.prepare(`

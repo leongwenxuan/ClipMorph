@@ -102,9 +102,12 @@ function setAppStatus(newStatus: AppStatus): void {
 }
 
 // Window size modes
-const COMPACT_SIZE = { width: 300, height: 44 }
+const COMPACT_SIZE = { width: 700, height: 52 } // Same width as expanded
+const COMPACT_WIDE_SIZE = { width: 700, height: 600 } // Wide compact for showing logs - same size as expanded
 const EXPANDED_SIZE = { width: 700, height: 600 }
-let isExpanded = false
+type WindowMode = 'compact' | 'compact-wide' | 'expanded'
+let windowMode: WindowMode = 'compact'
+let isExpanded = false // Keep for backwards compat
 
 function createWindow(): void {
   const primaryDisplay = screen.getPrimaryDisplay()
@@ -158,10 +161,19 @@ function createWindow(): void {
     }
   })
 
-  // Don't hide on blur - keep visible like VoiceInk
-  // mainWindow.on('blur', () => {
-  //   mainWindow?.hide()
-  // })
+  // Auto-compact when losing focus (switching to other apps)
+  mainWindow.on('blur', () => {
+    console.log('[ClipMorph] Window blur event')
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      // Only emit if auto-compact setting is enabled
+      const autoCompact = settingsService.getBoolean('ui.autoCompactOnBlur')
+      console.log('[ClipMorph] Auto-compact setting:', autoCompact)
+      if (autoCompact) {
+        console.log('[ClipMorph] Sending APP_BLUR event to renderer')
+        mainWindow.webContents.send(IpcChannels.EVENTS, createEvent(EventTypes.APP_BLUR, {}))
+      }
+    }
+  })
 
   // Load the renderer
   if (!app.isPackaged && process.env['ELECTRON_RENDERER_URL']) {
@@ -310,19 +322,39 @@ function positionWindowNearTray(): void {
 // IPC Handlers - Using clipmorph:<domain>:<action> convention
 // ============================================================================
 
-function toggleWindowSize(): void {
+function setWindowMode(mode: WindowMode): void {
   if (!mainWindow) return
 
   const display = screen.getPrimaryDisplay()
+  windowMode = mode
+  isExpanded = mode === 'expanded'
 
-  isExpanded = !isExpanded
-  const newSize = isExpanded ? EXPANDED_SIZE : COMPACT_SIZE
+  let newSize: { width: number; height: number }
+  switch (mode) {
+    case 'compact':
+      newSize = COMPACT_SIZE
+      break
+    case 'compact-wide':
+      newSize = COMPACT_WIDE_SIZE
+      break
+    case 'expanded':
+      newSize = EXPANDED_SIZE
+      break
+  }
 
   const x = Math.round((display.bounds.width - newSize.width) / 2)
-  // Compact hugs menu bar, expanded drops down a bit
-  const y = display.workArea.y + (isExpanded ? 10 : 0)
+  // Compact modes hug menu bar, expanded drops down a bit
+  const y = display.workArea.y + (mode === 'expanded' ? 10 : 0)
 
   mainWindow.setBounds({ x, y, width: newSize.width, height: newSize.height }, true)
+}
+
+function toggleWindowSize(): void {
+  if (!mainWindow) return
+
+  // Toggle between compact and expanded (skip compact-wide in manual toggle)
+  const newMode: WindowMode = windowMode === 'expanded' ? 'compact' : 'expanded'
+  setWindowMode(newMode)
 }
 
 function registerIpcHandlers(): void {
@@ -333,12 +365,18 @@ ipcMain.handle(IpcChannels.STATUS_GET, () => {
   // Window toggle handler
   ipcMain.handle('clipmorph:window:toggle', () => {
     toggleWindowSize()
-    return createSuccessResponse({ expanded: isExpanded })
+    return createSuccessResponse({ expanded: isExpanded, mode: windowMode })
   })
 
   ipcMain.handle('clipmorph:window:getState', () => {
-    return createSuccessResponse({ expanded: isExpanded })
-})
+    return createSuccessResponse({ expanded: isExpanded, mode: windowMode })
+  })
+
+  // Set window mode (for compact-wide logs view)
+  ipcMain.handle('clipmorph:window:setMode', (_event, args: { mode: WindowMode }) => {
+    setWindowMode(args.mode)
+    return createSuccessResponse({ expanded: isExpanded, mode: windowMode })
+  })
 
 // Permission handlers
 ipcMain.handle(IpcChannels.PERMISSION_GET_ALL, () => {
@@ -455,7 +493,9 @@ ipcMain.handle(IpcChannels.PERMISSION_CHECK, (_event, args: { type: PermissionTy
   ipcMain.handle(IpcChannels.CLIPBOARD_READ, () => {
     const text = clipboardService.readClipboard()
     const snapshot = clipboardService.getCurrentSnapshot()
-    return createSuccessResponse({ text, snapshot })
+    const filePaths = clipboardService.readFilePaths()
+    const formats = clipboardService.getAvailableFormats()
+    return createSuccessResponse({ text, snapshot, filePaths, formats })
   })
 
   ipcMain.handle(

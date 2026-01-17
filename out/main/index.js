@@ -17,6 +17,7 @@ const pdfParse = require("pdf-parse");
 const mammoth = require("mammoth");
 const playwright = require("playwright");
 const WebSocket = require("ws");
+const Groq = require("groq-sdk");
 function _interopNamespaceDefault(e) {
   const n = Object.create(null, { [Symbol.toStringTag]: { value: "Module" } });
   if (e) {
@@ -36,6 +37,7 @@ function _interopNamespaceDefault(e) {
 const path__namespace = /* @__PURE__ */ _interopNamespaceDefault(path);
 const fs__namespace = /* @__PURE__ */ _interopNamespaceDefault(fs);
 const pty__namespace = /* @__PURE__ */ _interopNamespaceDefault(pty);
+const os__namespace = /* @__PURE__ */ _interopNamespaceDefault(os);
 const IpcChannels = {
   // Status domain
   STATUS_GET: "clipmorph:status:get",
@@ -199,7 +201,10 @@ const EventTypes = {
   SKILL_DISCOVERED: "skill-discovered",
   SKILL_APPLIED: "skill-applied",
   SKILL_IMPORTED: "skill-imported",
-  SKILL_EXPORTED: "skill-exported"
+  SKILL_EXPORTED: "skill-exported",
+  // Window events
+  APP_BLUR: "app-blur",
+  APP_FOCUS: "app-focus"
 };
 function generateRequestId() {
   return `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
@@ -645,9 +650,44 @@ class ClipboardService {
    * Returns array of file paths, or empty array if no files
    */
   readFilePaths() {
+    const formats = this.getAvailableFormats();
     try {
       const buffer = electron.clipboard.readBuffer("NSFilenamesPboardType");
       if (buffer && buffer.length > 0) {
+        const plistStr = buffer.toString("utf8");
+        const stringMatches = plistStr.match(/<string>([^<]+)<\/string>/g);
+        if (stringMatches && stringMatches.length > 0) {
+          const paths = stringMatches.map((match) => {
+            const innerMatch = match.match(/<string>([^<]+)<\/string>/);
+            return innerMatch ? innerMatch[1] : null;
+          }).filter((p) => p !== null && p.startsWith("/"));
+          if (paths.length > 0) {
+            return paths;
+          }
+        }
+      }
+    } catch (err) {
+      console.log("[Clipboard] NSFilenamesPboardType parse failed:", err);
+    }
+    try {
+      if (formats.includes("public.file-url")) {
+        const fileUrl = electron.clipboard.read("public.file-url");
+        if (fileUrl && fileUrl.startsWith("file://")) {
+          const path2 = decodeURIComponent(fileUrl.replace("file://", ""));
+          return [path2];
+        }
+      }
+    } catch {
+    }
+    try {
+      if (formats.includes("text/uri-list")) {
+        const uriList = electron.clipboard.read("text/uri-list");
+        if (uriList) {
+          const paths = uriList.split("\n").filter((line) => line.trim() && line.startsWith("file://")).map((uri) => decodeURIComponent(uri.replace("file://", "").trim()));
+          if (paths.length > 0) {
+            return paths;
+          }
+        }
       }
     } catch {
     }
@@ -656,7 +696,7 @@ class ClipboardService {
       if (text && (text.startsWith("/") || text.startsWith("~"))) {
         const lines = text.split("\n").filter((line) => line.trim());
         const filePaths = lines.filter(
-          (line) => line.startsWith("/") || line.startsWith("~")
+          (line) => (line.startsWith("/") || line.startsWith("~")) && line.length < 1e3
         );
         if (filePaths.length > 0) {
           return filePaths;
@@ -664,20 +704,17 @@ class ClipboardService {
       }
     } catch {
     }
-    try {
-      const formats = electron.clipboard.availableFormats();
-      if (formats.includes("text/uri-list")) {
-        const uriList = electron.clipboard.read("text/uri-list");
-        if (uriList) {
-          const paths = uriList.split("\n").filter((line) => line.startsWith("file://")).map((uri) => decodeURIComponent(uri.replace("file://", "")));
-          if (paths.length > 0) {
-            return paths;
-          }
-        }
-      }
-    } catch {
-    }
     return [];
+  }
+  /**
+   * Get available clipboard formats
+   */
+  getAvailableFormats() {
+    try {
+      return electron.clipboard.availableFormats();
+    } catch {
+      return [];
+    }
   }
   /**
    * Write text to the clipboard (with self-trigger immunity)
@@ -861,8 +898,18 @@ const DEFAULT_SETTINGS = {
   "audio.minCaptureDuration": "200",
   "audio.inputDevice": "",
   // Empty = system default (macOS uses CoreAudio default)
-  "cerebras.model": "qwen-3-32b"
+  "cerebras.model": "qwen-3-32b",
   // Cerebras model for browser agent
+  "opencode.provider": "anthropic",
+  // OpenCode LLM provider
+  "opencode.model": "claude-3-5-sonnet-20241022",
+  // OpenCode model for selected provider
+  "ui.autoCompactOnBlur": "true",
+  // Auto-compact when app loses focus
+  "voice.sttProvider": "auto",
+  // STT provider: 'auto' | 'elevenlabs' | 'groq' | 'openai'
+  "voice.noiseSuppression": "false"
+  // Filter background noise (ElevenLabs only)
 };
 class StoreService {
   db = null;
@@ -1070,6 +1117,7 @@ class StoreService {
       operation.durationMs ?? null,
       Date.now()
     );
+    console.log(`[StoreService] Added operation: "${operation.command}" (${operation.jobType}) - ${operation.success ? "success" : "failed"}`);
     const deleteStmt = this.db.prepare(`
       DELETE FROM operations_history WHERE id NOT IN (
         SELECT id FROM operations_history ORDER BY created_at DESC LIMIT 100
@@ -2161,6 +2209,42 @@ class SecretsService {
   async hasCerebrasKey() {
     return this.hasSecret("cerebras-api-key");
   }
+  /**
+   * Get Groq API key specifically
+   */
+  async getGroqKey() {
+    return this.getSecret("groq-api-key");
+  }
+  /**
+   * Set Groq API key specifically
+   */
+  async setGroqKey(apiKey) {
+    return this.setSecret("groq-api-key", apiKey);
+  }
+  /**
+   * Check if Groq API key is configured
+   */
+  async hasGroqKey() {
+    return this.hasSecret("groq-api-key");
+  }
+  /**
+   * Get ElevenLabs API key specifically
+   */
+  async getElevenLabsKey() {
+    return this.getSecret("elevenlabs-api-key");
+  }
+  /**
+   * Set ElevenLabs API key specifically
+   */
+  async setElevenLabsKey(apiKey) {
+    return this.setSecret("elevenlabs-api-key", apiKey);
+  }
+  /**
+   * Check if ElevenLabs API key is configured
+   */
+  async hasElevenLabsKey() {
+    return this.hasSecret("elevenlabs-api-key");
+  }
 }
 const secretsService = new SecretsService();
 class LLMTransformService {
@@ -2204,7 +2288,10 @@ class LLMTransformService {
    * @param html - Optional HTML content (for rich formats like Excel tables)
    */
   async transform(command, text, html) {
+    console.log(`[LLMTransformService] Transform called with command: "${command}"`);
+    console.log(`[LLMTransformService] Input text length: ${text?.length || 0}`);
     if (!text || text.trim().length === 0) {
+      console.log("[LLMTransformService] Empty clipboard, returning error");
       return {
         success: false,
         input: text,
@@ -2213,7 +2300,9 @@ class LLMTransformService {
       };
     }
     try {
+      console.log("[LLMTransformService] Getting OpenAI client...");
       const client = await this.getClient();
+      console.log("[LLMTransformService] Client obtained, calling API...");
       const isTabular = this.isTabularContent(text, html);
       let contentToTransform = text;
       let formatHint = "";
@@ -2283,7 +2372,9 @@ ${contentToTransform}`
         max_tokens: 4096
       });
       const output = response.choices[0]?.message?.content?.trim();
+      console.log(`[LLMTransformService] API response received, output length: ${output?.length || 0}`);
       if (!output) {
+        console.log("[LLMTransformService] Empty response from LLM");
         return {
           success: false,
           input: text,
@@ -2291,6 +2382,7 @@ ${contentToTransform}`
           error: "LLM returned empty response"
         };
       }
+      console.log(`[LLMTransformService] Transform successful, output preview: "${output.substring(0, 100)}..."`);
       return {
         success: true,
         input: text,
@@ -2299,6 +2391,7 @@ ${contentToTransform}`
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.error("[LLMTransformService] Transform failed:", errorMessage);
+      console.error("[LLMTransformService] Full error:", error);
       return {
         success: false,
         input: text,
@@ -2905,6 +2998,149 @@ What should I do next? Respond with JSON only.`;
   }
 }
 const browserAgentService = new BrowserAgentService();
+class SettingsService {
+  eventEmitter = null;
+  changeListeners = /* @__PURE__ */ new Map();
+  /**
+   * Set the event emitter for sending events to the renderer
+   */
+  setEventEmitter(emitter) {
+    this.eventEmitter = emitter;
+  }
+  /**
+   * Emit an event to the renderer
+   */
+  emit(event) {
+    if (this.eventEmitter) {
+      this.eventEmitter(event);
+    }
+  }
+  /**
+   * Get a setting value
+   */
+  get(key) {
+    return storeService.getSettingOrDefault(key);
+  }
+  /**
+   * Get a boolean setting
+   */
+  getBoolean(key) {
+    const value = this.get(key);
+    return value === "true";
+  }
+  /**
+   * Get a number setting
+   */
+  getNumber(key) {
+    const value = this.get(key);
+    return parseInt(value, 10);
+  }
+  /**
+   * Set a setting value
+   */
+  set(key, value) {
+    const previousValue = storeService.getSetting(key);
+    storeService.setSetting(key, value);
+    this.emit(
+      createEvent(EventTypes.SETTINGS_CHANGED, {
+        key,
+        previousValue,
+        value
+      })
+    );
+    const listeners = this.changeListeners.get(key);
+    if (listeners) {
+      for (const listener of listeners) {
+        listener(value);
+      }
+    }
+    console.log(`[SettingsService] Setting changed: ${key} = ${value}`);
+  }
+  /**
+   * Set a boolean setting
+   */
+  setBoolean(key, value) {
+    this.set(key, value ? "true" : "false");
+  }
+  /**
+   * Set a number setting
+   */
+  setNumber(key, value) {
+    this.set(key, String(value));
+  }
+  /**
+   * Get all settings as a structured object
+   */
+  getAll() {
+    return {
+      hotkey: {
+        pushToTalk: this.get("hotkey.pushToTalk")
+      },
+      transforms: {
+        urlClean: { enabled: this.getBoolean("transforms.urlClean.enabled") },
+        urlMarkdown: { enabled: this.getBoolean("transforms.urlMarkdown.enabled") },
+        jsonPretty: { enabled: this.getBoolean("transforms.jsonPretty.enabled") },
+        jsonMinify: { enabled: this.getBoolean("transforms.jsonMinify.enabled") },
+        jsonToYaml: { enabled: this.getBoolean("transforms.jsonToYaml.enabled") },
+        yamlToJson: { enabled: this.getBoolean("transforms.yamlToJson.enabled") },
+        extractEmails: { enabled: this.getBoolean("transforms.extractEmails.enabled") },
+        extractLinks: { enabled: this.getBoolean("transforms.extractLinks.enabled") },
+        redactSecrets: { enabled: this.getBoolean("transforms.redactSecrets.enabled") }
+      },
+      ui: {
+        theme: this.get("ui.theme")
+      },
+      audio: {
+        minCaptureDuration: this.getNumber("audio.minCaptureDuration"),
+        inputDevice: this.get("audio.inputDevice")
+      }
+    };
+  }
+  /**
+   * Get all settings as flat key-value pairs
+   */
+  getAllFlat() {
+    return storeService.getAllSettings();
+  }
+  /**
+   * Reset a setting to its default value
+   */
+  reset(key) {
+    const defaultValue = DEFAULT_SETTINGS[key];
+    this.set(key, defaultValue);
+  }
+  /**
+   * Reset all settings to defaults
+   */
+  resetAll() {
+    for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
+      this.set(key, value);
+    }
+  }
+  /**
+   * Register a listener for setting changes
+   */
+  onChange(key, listener) {
+    if (!this.changeListeners.has(key)) {
+      this.changeListeners.set(key, /* @__PURE__ */ new Set());
+    }
+    this.changeListeners.get(key).add(listener);
+    return () => {
+      const listeners = this.changeListeners.get(key);
+      if (listeners) {
+        listeners.delete(listener);
+      }
+    };
+  }
+  /**
+   * Check if a transform is enabled
+   */
+  isTransformEnabled(transformKey) {
+    const key = `transforms.${transformKey}.enabled`;
+    return this.getBoolean(key);
+  }
+}
+const settingsService = new SettingsService();
 const execAsync = util.promisify(child_process.exec);
 function commandExists(command) {
   try {
@@ -3032,6 +3268,17 @@ class OpenCodeSidecar extends events.EventEmitter {
     this.emit("state", this.state);
     this.outputBuffer = "";
     const startTime = Date.now();
+    console.log("[OpenCode Sidecar] runTask called with prompt:", request.prompt.slice(0, 100));
+    const selectedProvider = settingsService.get("opencode.provider") || "anthropic";
+    console.log("[OpenCode Sidecar] Provider for auth:", selectedProvider);
+    const opencodeConfigDir = path__namespace.join(electron.app.getPath("userData"), "opencode-config");
+    console.log("[OpenCode Sidecar] Configuring auth in:", opencodeConfigDir);
+    try {
+      await this.configureOpenCodeAuth(opencodeConfigDir, selectedProvider);
+      console.log("[OpenCode Sidecar] Auth configured successfully");
+    } catch (authError) {
+      console.error("[OpenCode Sidecar] Auth configuration failed:", authError);
+    }
     return new Promise((resolve, reject) => {
       this.taskTimeout = setTimeout(() => {
         this.cancelTask();
@@ -3045,14 +3292,26 @@ class OpenCodeSidecar extends events.EventEmitter {
           command += ` --context '${escapedContext}'`;
         }
         const args = ["run", request.prompt];
+        const opencodeModel = settingsService.get("opencode.model");
+        if (opencodeModel && opencodeModel.startsWith("opencode/")) {
+          args.push("--model", opencodeModel);
+          console.log("[OpenCode] Using model:", opencodeModel);
+        } else {
+          console.log("[OpenCode] Using default model (settings model not compatible:", opencodeModel, ")");
+        }
         const autoApprove = process.env.OPENCODE_AUTO_APPROVE === "true";
         if (autoApprove) {
           args.push("--yes");
         }
-        const { app } = require("electron");
-        const opencodeConfigDir = require("path").join(app.getPath("userData"), "opencode-config");
-        console.log("[OpenCode] Starting:", this.binaryPath, args.join(" "));
+        console.log("[OpenCode] ========== SPAWNING OPENCODE ==========");
+        console.log("[OpenCode] Binary:", this.binaryPath);
+        console.log("[OpenCode] Args:", JSON.stringify(args));
         console.log("[OpenCode] Working directory:", request.cwd || process.cwd());
+        console.log("[OpenCode] Config dir:", opencodeConfigDir);
+        if (!fs__namespace.existsSync(this.binaryPath)) {
+          throw new Error(`OpenCode binary not found at: ${this.binaryPath}`);
+        }
+        console.log("[OpenCode] Binary exists, spawning PTY...");
         this.ptyProcess = pty__namespace.spawn(this.binaryPath, args, {
           name: "xterm-256color",
           cols: 120,
@@ -3069,11 +3328,14 @@ class OpenCodeSidecar extends events.EventEmitter {
             OPENCODE_CONFIG_DIR: opencodeConfigDir
           }
         });
+        console.log("[OpenCode] PTY process spawned with PID:", this.ptyProcess.pid);
         this.ptyProcess.onData((data) => {
           this.outputBuffer += data;
           const cleanData = data.replace(/\x1b\[[0-9;]*m/g, "").trim();
           if (cleanData) {
-            console.log("[OpenCode]", cleanData);
+            console.log("[OpenCode OUTPUT]", cleanData);
+          } else if (data.trim()) {
+            console.log("[OpenCode RAW]", JSON.stringify(data.slice(0, 200)));
           }
           const chunk = {
             type: "stdout",
@@ -3095,7 +3357,12 @@ class OpenCodeSidecar extends events.EventEmitter {
           this.clearTaskTimeout();
           const durationMs = Date.now() - startTime;
           const success = exitCode === 0;
-          console.log(`[OpenCode] Process exited with code ${exitCode} (${durationMs}ms)`);
+          console.log("[OpenCode] ========== PROCESS EXITED ==========");
+          console.log(`[OpenCode] Exit code: ${exitCode}, Signal: ${signal}, Duration: ${durationMs}ms`);
+          console.log("[OpenCode] Total output length:", this.outputBuffer.length);
+          if (!success && this.outputBuffer) {
+            console.log("[OpenCode] Last 500 chars of output:", this.outputBuffer.slice(-500));
+          }
           const result = {
             success,
             output: this.outputBuffer,
@@ -3174,6 +3441,48 @@ class OpenCodeSidecar extends events.EventEmitter {
     this.lastPermissionPrompt = "";
   }
   lastPermissionPrompt = "";
+  /**
+   * Configure OpenCode authentication by writing API key to auth.json
+   * Maps provider names to OpenCode's expected format
+   */
+  async configureOpenCodeAuth(configDir, provider) {
+    try {
+      const providerMap = {
+        "anthropic": "anthropic",
+        "openai": "openai",
+        "google": "google",
+        "xai": "x-ai",
+        "zai": "z-ai"
+      };
+      const opencodeProvider = providerMap[provider] || provider;
+      const secretKey = `${provider}-api-key`;
+      const apiKey = await secretsService.getSecret(secretKey);
+      if (!apiKey) {
+        console.warn(`[OpenCode] No API key found for provider: ${provider}`);
+        return;
+      }
+      if (!fs__namespace.existsSync(configDir)) {
+        fs__namespace.mkdirSync(configDir, { recursive: true });
+      }
+      const authFilePath = path__namespace.join(configDir, "auth.json");
+      let authData = {};
+      if (fs__namespace.existsSync(authFilePath)) {
+        try {
+          const content = fs__namespace.readFileSync(authFilePath, "utf-8");
+          authData = JSON.parse(content);
+        } catch (err) {
+          console.warn("[OpenCode] Failed to parse existing auth.json, creating new one");
+        }
+      }
+      authData[opencodeProvider] = {
+        apiKey
+      };
+      fs__namespace.writeFileSync(authFilePath, JSON.stringify(authData, null, 2), "utf-8");
+      console.log(`[OpenCode] Configured API key for provider: ${opencodeProvider}`);
+    } catch (err) {
+      console.error("[OpenCode] Failed to configure authentication:", err);
+    }
+  }
   /**
    * Detect permission prompts in OpenCode output
    * Returns parsed permission request or null if not a permission prompt
@@ -3280,6 +3589,7 @@ class OpenCodeService extends events.EventEmitter {
           }
         };
         this.emit("event", createEvent(EventTypes.OPENCODE_OUTPUT, payload, this.activeJob.id));
+        console.log("[OpenCodeService] Emitted OPENCODE_OUTPUT event, chunk size:", chunk.data.length);
       }
     });
     this.sidecar.on("permissionRequest", (request) => {
@@ -3428,7 +3738,11 @@ Fix: ${error.fix}` : ""}`
       context: request.context,
       cwd: request.cwd
     };
-    this.sidecar.runTask(taskRequest).catch((error) => {
+    console.log("[OpenCodeService] Starting sidecar.runTask...");
+    this.sidecar.runTask(taskRequest).then((result) => {
+      console.log("[OpenCodeService] Sidecar task completed:", result.success ? "success" : "failed");
+    }).catch((error) => {
+      console.error("[OpenCodeService] Sidecar task error:", error.message);
       if (this.activeJob && this.activeJob.id === job.id) {
         this.activeJob.status = "failed";
         this.activeJob.error = error.message;
@@ -5226,16 +5540,23 @@ class LLMIntentService {
 
 Given a user's voice command, classify it into ONE of these intents:
 
-CODE INTENTS (use OpenCode CLI for agentic coding):
-- code:generate - Create new code, functions, components, classes
-- code:refactor - Refactor, restructure, rewrite existing code
-- code:fix - Fix bugs, debug, repair code
-- code:explain - Explain what code does
-- code:improve - Optimize, enhance, make code better
-- code:convert - Convert code to another language (e.g., TypeScript)
+CODE INTENTS (for modifying SOURCE CODE FILES in a project/codebase):
+- code:generate - Create new source code files, functions, classes, components in a codebase
+- code:refactor - Refactor actual source code files
+- code:fix - Fix bugs in source code files
+- code:explain - Explain source code
+- code:improve - Optimize source code files
+- code:convert - Convert source code to another programming language
 
-TRANSFORM INTENTS (use LLM to transform clipboard text):
-- Use "transform" for: summarize, translate, reformat, shorten, expand, clean up text, extract info, etc.
+TRANSFORM INTENTS (for transforming CLIPBOARD DATA - text, tables, numbers):
+- Use "transform" for ALL of these:
+  * Calculations on data (calculate ratios, sum, average, etc.)
+  * Data analysis (analyze, compare, find trends)
+  * Table/spreadsheet operations (format for Excel, create table, add columns)
+  * Text transformations (summarize, translate, reformat, clean up)
+  * Data extraction (extract emails, links, names, etc.)
+  * Number crunching or financial calculations
+  * Converting data formats (CSV to JSON, etc.)
 
 BROWSER INTENTS (automate web browser):
 - automation:portal - Fill forms, click buttons, navigate websites, sign up, log in
@@ -5251,9 +5572,15 @@ SPECIAL INTENTS:
 - cancel - Cancel current operation
 - undo - Undo last action
 
-If the command is about writing, creating, or modifying CODE/FUNCTIONS/COMPONENTS → use code:* intents
-If the command is about transforming TEXT content → use "transform"
-If unsure, use "transform" as the safe default.
+CRITICAL DISTINCTION:
+- CODE intents are ONLY for modifying actual source code files (.js, .py, .ts, etc.) in a programming project
+- TRANSFORM is for processing/analyzing DATA that is on the clipboard (text, tables, numbers, spreadsheet data)
+- "Calculate X from data" → TRANSFORM (processing data)
+- "Write a function to calculate X" → code:generate (creating source code)
+- "Put data in Excel table format" → TRANSFORM (formatting data)
+- "Create an Excel macro" → code:generate (creating source code)
+
+When in doubt, use "transform". Most voice commands about data manipulation should be "transform".
 
 Respond with JSON only: {"intent": "<intent>", "confidence": <0.0-1.0>, "reasoning": "<brief explanation>"}`;
     const response = await client.chat.completions.create({
@@ -5606,8 +5933,11 @@ class IntentService {
         error: result.error
       };
     }
+    console.log(`[IntentService] Writing result to clipboard (${result.output.length} chars)`);
     const writeResult = clipboardService.writeClipboardGated(result.output, snapshot.id);
+    console.log(`[IntentService] Write result: success=${writeResult.success}`);
     if (!writeResult.success) {
+      console.log(`[IntentService] Clipboard write failed: ${writeResult.error?.message}`);
       jobManager.failJob(job.id, {
         code: writeResult.error.code,
         message: writeResult.error.message
@@ -5930,6 +6260,7 @@ ${clipboardText}
     const opencodeCwd = storeService.getSetting("opencode_cwd") || process.env.HOME || process.cwd();
     console.log(`[IntentService] Starting OpenCode task for intent ${intent}: "${classification.rawTranscript}"`);
     console.log(`[IntentService] Working directory: ${opencodeCwd}`);
+    const startTime = Date.now();
     try {
       const result = await openCodeService.runTask({
         prompt,
@@ -5938,6 +6269,14 @@ ${clipboardText}
       });
       console.log(`[IntentService] Started OpenCode job ${result.jobId}`);
       this.updateLastAction(classification.rawTranscript, intent, true, result.jobId);
+      storeService.addOperation({
+        id: result.jobId,
+        command: classification.rawTranscript,
+        jobType: intent,
+        inputText: context || clipboardText,
+        success: true,
+        durationMs: Date.now() - startTime
+      });
       return {
         intent,
         classification,
@@ -5948,6 +6287,15 @@ ${clipboardText}
       const errorMsg = error.message;
       console.error(`[IntentService] OpenCode task failed:`, errorMsg);
       this.updateLastAction(classification.rawTranscript, intent, false, void 0, errorMsg);
+      storeService.addOperation({
+        id: `opencode-failed-${Date.now()}`,
+        command: classification.rawTranscript,
+        jobType: intent,
+        inputText: context || clipboardText,
+        success: false,
+        error: errorMsg,
+        durationMs: Date.now() - startTime
+      });
       return {
         intent,
         classification,
@@ -6238,17 +6586,22 @@ class OpenAISttService {
         case "conversation.item.input_audio_transcription.delta":
           if (message.delta) {
             this.currentTranscript += message.delta;
-            this.transcriptCallback?.({
-              text: this.currentTranscript,
-              isFinal: false
-            });
+            const fullText = this.allTranscripts.length > 0 ? this.allTranscripts.join(" ") + " " + this.currentTranscript : this.currentTranscript;
+            console.log("[OpenAI-STT] Live transcript:", fullText);
+            if (this.transcriptCallback) {
+              console.log("[OpenAI-STT] Calling transcript callback...");
+              this.transcriptCallback({ text: fullText, isFinal: false });
+            } else {
+              console.log("[OpenAI-STT] WARNING: No transcript callback set!");
+            }
           }
           break;
         case "conversation.item.input_audio_transcription.completed":
           const finalText = message.transcript || this.currentTranscript;
-          console.log("[OpenAI-STT] Transcription completed:", finalText);
+          console.log("[OpenAI-STT] Transcription segment completed:", finalText);
           if (finalText.trim()) {
             this.allTranscripts.push(finalText.trim());
+            console.log("[OpenAI-STT] Accumulated transcripts:", this.allTranscripts.length, "segments, total:", this.allTranscripts.join(" "));
           }
           this.transcriptCallback?.({
             text: this.allTranscripts.join(" "),
@@ -6257,10 +6610,10 @@ class OpenAISttService {
           this.currentTranscript = "";
           break;
         case "input_audio_buffer.speech_started":
-          console.log("[OpenAI-STT] Speech started");
+          console.log("[OpenAI-STT] Speech started (VAD detected voice)");
           break;
         case "input_audio_buffer.speech_stopped":
-          console.log("[OpenAI-STT] Speech stopped");
+          console.log("[OpenAI-STT] Speech stopped (VAD detected silence)");
           break;
         case "input_audio_buffer.committed":
           break;
@@ -6268,6 +6621,7 @@ class OpenAISttService {
           console.error("[OpenAI-STT] API error:", message.error);
           break;
         default:
+          console.log("[OpenAI-STT] Unknown event type:", message.type);
           break;
       }
     } catch (error) {
@@ -6360,149 +6714,438 @@ class OpenAISttService {
   }
 }
 const openaiSttService = new OpenAISttService();
-class SettingsService {
-  eventEmitter = null;
-  changeListeners = /* @__PURE__ */ new Map();
+class GroqSttService {
+  client = null;
+  apiKey = null;
   /**
-   * Set the event emitter for sending events to the renderer
+   * Get or create Groq client
    */
-  setEventEmitter(emitter) {
-    this.eventEmitter = emitter;
-  }
-  /**
-   * Emit an event to the renderer
-   */
-  emit(event) {
-    if (this.eventEmitter) {
-      this.eventEmitter(event);
+  async getClient() {
+    const apiKey = await secretsService.getGroqKey();
+    if (!apiKey) {
+      throw new Error("No Groq API key configured. Add it in Settings.");
     }
+    if (!this.client || this.apiKey !== apiKey) {
+      this.apiKey = apiKey;
+      this.client = new Groq({ apiKey });
+    }
+    return this.client;
   }
   /**
-   * Get a setting value
+   * Check if Groq API key is configured
    */
-  get(key) {
-    return storeService.getSettingOrDefault(key);
+  async hasApiKey() {
+    const key = await secretsService.getGroqKey();
+    return !!key;
   }
   /**
-   * Get a boolean setting
+   * Transcribe audio buffer using Groq Whisper
+   * @param audioBuffer - Raw PCM16 audio at 16kHz mono
+   * @param durationMs - Recording duration in milliseconds
    */
-  getBoolean(key) {
-    const value = this.get(key);
-    return value === "true";
-  }
-  /**
-   * Get a number setting
-   */
-  getNumber(key) {
-    const value = this.get(key);
-    return parseInt(value, 10);
-  }
-  /**
-   * Set a setting value
-   */
-  set(key, value) {
-    const previousValue = storeService.getSetting(key);
-    storeService.setSetting(key, value);
-    this.emit(
-      createEvent(EventTypes.SETTINGS_CHANGED, {
-        key,
-        previousValue,
-        value
-      })
-    );
-    const listeners = this.changeListeners.get(key);
-    if (listeners) {
-      for (const listener of listeners) {
-        listener(value);
+  async transcribe(audioBuffer, durationMs) {
+    const client = await this.getClient();
+    console.log(`[GroqSTT] Transcribing ${audioBuffer.length} bytes (${durationMs}ms)...`);
+    const wavBuffer = this.pcmToWav(audioBuffer, 16e3, 1, 16);
+    const tempPath = path__namespace.join(os__namespace.tmpdir(), `clipmorph-audio-${Date.now()}.wav`);
+    fs__namespace.writeFileSync(tempPath, wavBuffer);
+    try {
+      const startTime = Date.now();
+      const transcription = await client.audio.transcriptions.create({
+        file: fs__namespace.createReadStream(tempPath),
+        model: "whisper-large-v3-turbo",
+        // Fast and accurate
+        language: "en",
+        response_format: "json"
+      });
+      const elapsed = Date.now() - startTime;
+      console.log(`[GroqSTT] Transcription completed in ${elapsed}ms: "${transcription.text}"`);
+      return {
+        text: transcription.text,
+        duration: elapsed
+      };
+    } finally {
+      try {
+        fs__namespace.unlinkSync(tempPath);
+      } catch {
       }
     }
-    console.log(`[SettingsService] Setting changed: ${key} = ${value}`);
   }
   /**
-   * Set a boolean setting
+   * Convert raw PCM16 audio to WAV format
    */
-  setBoolean(key, value) {
-    this.set(key, value ? "true" : "false");
-  }
-  /**
-   * Set a number setting
-   */
-  setNumber(key, value) {
-    this.set(key, String(value));
-  }
-  /**
-   * Get all settings as a structured object
-   */
-  getAll() {
-    return {
-      hotkey: {
-        pushToTalk: this.get("hotkey.pushToTalk")
-      },
-      transforms: {
-        urlClean: { enabled: this.getBoolean("transforms.urlClean.enabled") },
-        urlMarkdown: { enabled: this.getBoolean("transforms.urlMarkdown.enabled") },
-        jsonPretty: { enabled: this.getBoolean("transforms.jsonPretty.enabled") },
-        jsonMinify: { enabled: this.getBoolean("transforms.jsonMinify.enabled") },
-        jsonToYaml: { enabled: this.getBoolean("transforms.jsonToYaml.enabled") },
-        yamlToJson: { enabled: this.getBoolean("transforms.yamlToJson.enabled") },
-        extractEmails: { enabled: this.getBoolean("transforms.extractEmails.enabled") },
-        extractLinks: { enabled: this.getBoolean("transforms.extractLinks.enabled") },
-        redactSecrets: { enabled: this.getBoolean("transforms.redactSecrets.enabled") }
-      },
-      ui: {
-        theme: this.get("ui.theme")
-      },
-      audio: {
-        minCaptureDuration: this.getNumber("audio.minCaptureDuration"),
-        inputDevice: this.get("audio.inputDevice")
-      }
-    };
-  }
-  /**
-   * Get all settings as flat key-value pairs
-   */
-  getAllFlat() {
-    return storeService.getAllSettings();
-  }
-  /**
-   * Reset a setting to its default value
-   */
-  reset(key) {
-    const defaultValue = DEFAULT_SETTINGS[key];
-    this.set(key, defaultValue);
-  }
-  /**
-   * Reset all settings to defaults
-   */
-  resetAll() {
-    for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
-      this.set(key, value);
-    }
-  }
-  /**
-   * Register a listener for setting changes
-   */
-  onChange(key, listener) {
-    if (!this.changeListeners.has(key)) {
-      this.changeListeners.set(key, /* @__PURE__ */ new Set());
-    }
-    this.changeListeners.get(key).add(listener);
-    return () => {
-      const listeners = this.changeListeners.get(key);
-      if (listeners) {
-        listeners.delete(listener);
-      }
-    };
-  }
-  /**
-   * Check if a transform is enabled
-   */
-  isTransformEnabled(transformKey) {
-    const key = `transforms.${transformKey}.enabled`;
-    return this.getBoolean(key);
+  pcmToWav(pcmBuffer, sampleRate, channels, bitsPerSample) {
+    const dataSize = pcmBuffer.length;
+    const headerSize = 44;
+    const fileSize = headerSize + dataSize - 8;
+    const byteRate = sampleRate * channels * (bitsPerSample / 8);
+    const blockAlign = channels * (bitsPerSample / 8);
+    const header = Buffer.alloc(headerSize);
+    header.write("RIFF", 0);
+    header.writeUInt32LE(fileSize, 4);
+    header.write("WAVE", 8);
+    header.write("fmt ", 12);
+    header.writeUInt32LE(16, 16);
+    header.writeUInt16LE(1, 20);
+    header.writeUInt16LE(channels, 22);
+    header.writeUInt32LE(sampleRate, 24);
+    header.writeUInt32LE(byteRate, 28);
+    header.writeUInt16LE(blockAlign, 32);
+    header.writeUInt16LE(bitsPerSample, 34);
+    header.write("data", 36);
+    header.writeUInt32LE(dataSize, 40);
+    return Buffer.concat([header, pcmBuffer]);
   }
 }
-const settingsService = new SettingsService();
+const groqSttService = new GroqSttService();
+const SILENCE_TIMEOUT_MS = 1300;
+class ElevenLabsSttService {
+  ws = null;
+  apiKey = null;
+  isConnected = false;
+  transcriptCallback = null;
+  executeCallback = null;
+  currentTranscript = "";
+  committedTranscripts = [];
+  isListening = false;
+  reconnectTimeout = null;
+  keepAliveInterval = null;
+  silenceTimeout = null;
+  lastAudioTime = 0;
+  hasExecuted = false;
+  // Prevent double execution
+  // Audio settings
+  suppressNonSpeech = false;
+  // Track last transcript to detect actual changes
+  lastTranscriptText = "";
+  // Track last EXECUTED transcript to prevent re-execution loops
+  lastExecutedTranscript = "";
+  /**
+   * Set the API key
+   */
+  setApiKey(apiKey) {
+    this.apiKey = apiKey;
+  }
+  /**
+   * Enable/disable noise suppression (filters background noise, music, etc.)
+   */
+  setNoiseSuppression(enabled) {
+    this.suppressNonSpeech = enabled;
+    console.log(`[ElevenLabs-STT] Noise suppression: ${enabled ? "ON" : "OFF"}`);
+  }
+  /**
+   * Get current noise suppression setting
+   */
+  getNoiseSuppression() {
+    return this.suppressNonSpeech;
+  }
+  /**
+   * Check if API key is configured
+   */
+  async hasApiKey() {
+    const key = await secretsService.getElevenLabsKey();
+    return !!key;
+  }
+  /**
+   * Connect to ElevenLabs Realtime STT
+   */
+  async connect() {
+    const apiKey = this.apiKey || await secretsService.getElevenLabsKey();
+    if (!apiKey) {
+      console.error("[ElevenLabs-STT] No API key configured");
+      return false;
+    }
+    this.apiKey = apiKey;
+    if (this.ws) {
+      this.disconnect();
+    }
+    return new Promise((resolve) => {
+      try {
+        const params = new URLSearchParams({
+          model_id: "scribe_v2_realtime",
+          language_code: "en",
+          sample_rate: "16000",
+          enable_logging: "false"
+        });
+        if (this.suppressNonSpeech) {
+          params.set("suppress_non_speech", "true");
+          console.log("[ElevenLabs-STT] Noise suppression enabled");
+        }
+        const url = `wss://api.elevenlabs.io/v1/speech-to-text/realtime?${params.toString()}`;
+        console.log("[ElevenLabs-STT] Connecting to:", url);
+        this.ws = new WebSocket(url, {
+          headers: {
+            "xi-api-key": apiKey
+          }
+        });
+        this.ws.on("open", () => {
+          console.log("[ElevenLabs-STT] WebSocket connected");
+          this.isConnected = true;
+          this.startKeepAlive();
+          resolve(true);
+        });
+        this.ws.on("message", (data) => {
+          this.handleMessage(data.toString());
+        });
+        this.ws.on("close", (code, reason) => {
+          console.log(`[ElevenLabs-STT] WebSocket closed (code: ${code}, reason: ${reason})`);
+          this.isConnected = false;
+          this.stopKeepAlive();
+          if (this.isListening && !this.reconnectTimeout) {
+            console.log("[ElevenLabs-STT] Will attempt reconnect in 2s...");
+            this.reconnectTimeout = setTimeout(() => {
+              this.reconnectTimeout = null;
+              if (this.isListening) {
+                this.connect();
+              }
+            }, 2e3);
+          }
+        });
+        this.ws.on("error", (error) => {
+          console.error("[ElevenLabs-STT] WebSocket error:", error);
+          resolve(false);
+        });
+      } catch (error) {
+        console.error("[ElevenLabs-STT] Failed to connect:", error);
+        resolve(false);
+      }
+    });
+  }
+  /**
+   * Handle incoming WebSocket messages
+   */
+  handleMessage(data) {
+    try {
+      const message = JSON.parse(data);
+      const messageType = message.message_type;
+      if (messageType !== "audio_acknowledgement") {
+        console.log("[ElevenLabs-STT] Message:", messageType, JSON.stringify(message).substring(0, 300));
+      }
+      switch (messageType) {
+        case "session_started":
+          console.log("[ElevenLabs-STT] Session started, id:", message.session_id);
+          break;
+        case "partial_transcript":
+          if (message.text) {
+            this.currentTranscript = message.text;
+            const fullText = this.getFullTranscript();
+            const textChanged = fullText !== this.lastTranscriptText;
+            if (textChanged) {
+              console.log("[ElevenLabs-STT] Live:", fullText);
+              this.lastTranscriptText = fullText;
+              this.resetSilenceTimer();
+              this.startSilenceTimer();
+            }
+            this.transcriptCallback?.({
+              text: fullText,
+              isFinal: false,
+              isPartial: true
+            });
+          }
+          break;
+        case "final_transcript":
+        case "committed_transcript":
+          if (message.text && message.text.trim()) {
+            console.log("[ElevenLabs-STT] Final:", message.text);
+            this.committedTranscripts.push(message.text.trim());
+            this.currentTranscript = "";
+            const fullText = this.getFullTranscript();
+            this.transcriptCallback?.({
+              text: fullText,
+              isFinal: true,
+              isPartial: false
+            });
+            this.startSilenceTimer();
+          }
+          break;
+        case "audio_acknowledgement":
+          break;
+        case "resource_exhausted":
+          console.warn("[ElevenLabs-STT] Rate limit hit - service at capacity");
+          this.transcriptCallback?.({
+            text: "⚠️ Voice service temporarily unavailable (rate limit)",
+            isFinal: false,
+            isPartial: false
+          });
+          break;
+        case "input_error":
+        case "error":
+          if (message.error === "Message must be a valid protocol message") {
+            break;
+          }
+          console.error("[ElevenLabs-STT] API error:", message.error || message);
+          break;
+        default:
+          if (messageType) {
+            console.log("[ElevenLabs-STT] Unhandled message_type:", messageType);
+          }
+          break;
+      }
+    } catch (error) {
+      console.error("[ElevenLabs-STT] Failed to parse message:", error, data);
+    }
+  }
+  /**
+   * Start silence timer - auto-execute after SILENCE_TIMEOUT_MS of no new speech
+   */
+  startSilenceTimer() {
+    this.resetSilenceTimer();
+    this.silenceTimeout = setTimeout(() => {
+      if (this.isListening && !this.hasExecuted) {
+        const transcript = this.getFullTranscript();
+        if (transcript && transcript.length > 15) {
+          if (transcript === this.lastExecutedTranscript) {
+            console.log(`[ElevenLabs-STT] Ignoring duplicate transcript: "${transcript.substring(0, 50)}..."`);
+            return;
+          }
+          if (this.lastExecutedTranscript && transcript.startsWith(this.lastExecutedTranscript)) {
+            const newPart = transcript.slice(this.lastExecutedTranscript.length).trim();
+            if (newPart.length < 10) {
+              console.log(`[ElevenLabs-STT] New addition too short: "${newPart}"`);
+              return;
+            }
+          }
+          console.log(`[ElevenLabs-STT] Silence timeout (${SILENCE_TIMEOUT_MS}ms), auto-executing!`);
+          this.hasExecuted = true;
+          this.lastExecutedTranscript = transcript;
+          this.executeCallback?.(transcript, "silence");
+        } else if (transcript) {
+          console.log(`[ElevenLabs-STT] Transcript too short to execute: "${transcript}" (${transcript.length} chars)`);
+        }
+      }
+    }, SILENCE_TIMEOUT_MS);
+  }
+  /**
+   * Reset silence timer (called when new speech detected)
+   */
+  resetSilenceTimer() {
+    if (this.silenceTimeout) {
+      clearTimeout(this.silenceTimeout);
+      this.silenceTimeout = null;
+    }
+    this.lastAudioTime = Date.now();
+  }
+  /**
+   * Set callback for auto-execution (pattern or silence triggered)
+   */
+  onExecute(callback) {
+    this.executeCallback = callback;
+  }
+  /**
+   * Send audio chunk to the API
+   * @param buffer Raw PCM16 audio at 16kHz mono
+   */
+  sendAudioChunk(buffer) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    try {
+      const message = {
+        message_type: "input_audio_chunk",
+        audio_base_64: buffer.toString("base64"),
+        sample_rate: 16e3
+      };
+      this.ws.send(JSON.stringify(message));
+    } catch (error) {
+      console.error("[ElevenLabs-STT] Failed to send audio chunk:", error);
+    }
+  }
+  /**
+   * Set callback for transcription results
+   */
+  onTranscript(callback) {
+    this.transcriptCallback = callback;
+  }
+  /**
+   * Get the full accumulated transcript
+   */
+  getFullTranscript() {
+    const committed = this.committedTranscripts.join(" ");
+    if (this.currentTranscript) {
+      return committed ? `${committed} ${this.currentTranscript}` : this.currentTranscript;
+    }
+    return committed;
+  }
+  /**
+   * Clear transcripts and reset state
+   */
+  clearTranscripts() {
+    this.currentTranscript = "";
+    this.committedTranscripts = [];
+    this.hasExecuted = false;
+    this.lastTranscriptText = "";
+    this.resetSilenceTimer();
+  }
+  /**
+   * Start continuous listening mode
+   */
+  async startListening() {
+    this.isListening = true;
+    this.hasExecuted = false;
+    this.lastExecutedTranscript = "";
+    this.clearTranscripts();
+    if (!this.isConnected) {
+      return await this.connect();
+    }
+    return true;
+  }
+  /**
+   * Stop continuous listening mode
+   */
+  stopListening() {
+    this.isListening = false;
+    let finalTranscript = this.getFullTranscript();
+    if (!finalTranscript && this.currentTranscript) {
+      finalTranscript = this.currentTranscript;
+    }
+    console.log("[ElevenLabs-STT] Stop listening, transcript:", finalTranscript);
+    return finalTranscript;
+  }
+  /**
+   * Start keep-alive pings
+   */
+  startKeepAlive() {
+    this.stopKeepAlive();
+    this.keepAliveInterval = setInterval(() => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({ type: "ping" }));
+      }
+    }, 15e3);
+  }
+  /**
+   * Stop keep-alive pings
+   */
+  stopKeepAlive() {
+    if (this.keepAliveInterval) {
+      clearInterval(this.keepAliveInterval);
+      this.keepAliveInterval = null;
+    }
+  }
+  /**
+   * Disconnect from the API
+   */
+  disconnect() {
+    this.isListening = false;
+    this.stopKeepAlive();
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
+    }
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+    this.isConnected = false;
+    this.clearTranscripts();
+  }
+  /**
+   * Check if connected and ready
+   */
+  isReady() {
+    return this.isConnected && this.ws?.readyState === WebSocket.OPEN;
+  }
+}
+const elevenLabsSttService = new ElevenLabsSttService();
 const record = require("node-record-lpcm16");
 const DEFAULT_PTT_HOTKEY = "CommandOrControl+Shift+V";
 const VALID_MODIFIERS = ["Command", "Cmd", "Control", "Ctrl", "CommandOrControl", "CmdOrCtrl", "Alt", "Option", "AltGr", "Shift", "Super", "Meta"];
@@ -6634,7 +7277,8 @@ class VoiceService {
     isCapturing: false,
     startTime: null,
     recording: null,
-    pendingTranscript: ""
+    pendingTranscript: "",
+    audioChunks: []
   };
   // Status callback for app status updates
   statusCallback = null;
@@ -6699,6 +7343,7 @@ class VoiceService {
     }
     openaiSttService.onTranscript((result) => {
       this.captureState.pendingTranscript = result.text;
+      console.log(`[VoiceService] Emitting transcript to UI: "${result.text}" (isFinal: ${result.isFinal})`);
       this.emit(
         createEvent(EventTypes.VOICE_TRANSCRIPT, {
           text: result.text,
@@ -6800,12 +7445,20 @@ class VoiceService {
       isCapturing: true,
       startTime: Date.now(),
       recording: null,
-      pendingTranscript: ""
+      pendingTranscript: "",
+      audioChunks: []
+      // Reset audio buffer for Groq
     };
     this.setAppStatus("listening");
     this.emit(createEvent(EventTypes.VOICE_STARTED));
     console.log("[VoiceService] Audio capture started");
-    openaiSttService.clearAudio();
+    const sttProvider = await this.getSttProvider();
+    console.log(`[VoiceService] Using ${sttProvider} for transcription`);
+    if (sttProvider === "elevenlabs") {
+      await this.setupElevenLabsStreaming();
+    } else {
+      openaiSttService.clearAudio();
+    }
     try {
       const inputDevice = settingsService.get("audio.inputDevice");
       const recordOptions = {
@@ -6813,24 +7466,121 @@ class VoiceService {
         channels: 1,
         audioType: "raw",
         // raw PCM, no WAV header
-        recorder: "sox"
+        recorder: "sox",
+        verbose: true
+        // Enable verbose logging
       };
       if (inputDevice) {
         recordOptions.device = inputDevice;
         console.log(`[VoiceService] Using audio device: ${inputDevice}`);
       }
+      console.log("[VoiceService] Starting sox recording with options:", JSON.stringify(recordOptions));
       const recording = record.record(recordOptions);
       this.captureState.recording = recording;
+      let chunkCount = 0;
+      let totalBytes = 0;
       recording.stream().on("data", (chunk) => {
         if (this.captureState.isCapturing) {
-          openaiSttService.sendAudioBuffer(chunk);
+          chunkCount++;
+          totalBytes += chunk.length;
+          this.captureState.audioChunks.push(chunk);
+          if (chunkCount === 1) {
+            console.log(`[VoiceService] First audio chunk received: ${chunk.length} bytes`);
+          } else if (chunkCount % 50 === 0) {
+            console.log(`[VoiceService] Audio chunk #${chunkCount}, total: ${totalBytes} bytes`);
+          }
+          if (sttProvider === "elevenlabs") {
+            elevenLabsSttService.sendAudioChunk(chunk);
+          } else if (sttProvider === "openai") {
+            openaiSttService.sendAudioBuffer(chunk);
+          }
         }
       });
       recording.stream().on("error", (err) => {
-        console.error("[VoiceService] Recording error:", err);
+        console.error("[VoiceService] Recording stream error:", err);
+      });
+      recording.stream().on("end", () => {
+        console.log(`[VoiceService] Recording stream ended. Total chunks: ${chunkCount}, total bytes: ${totalBytes}`);
       });
     } catch (err) {
       console.error("[VoiceService] Failed to start recording:", err);
+    }
+  }
+  /**
+   * Determine which STT provider to use
+   */
+  async getSttProvider() {
+    const preferredProvider = settingsService.get("voice.sttProvider");
+    if (preferredProvider === "elevenlabs" && await elevenLabsSttService.hasApiKey()) {
+      return "elevenlabs";
+    }
+    if (preferredProvider === "groq" && await groqSttService.hasApiKey()) {
+      return "groq";
+    }
+    if (await elevenLabsSttService.hasApiKey()) {
+      return "elevenlabs";
+    }
+    if (await groqSttService.hasApiKey()) {
+      return "groq";
+    }
+    return "openai";
+  }
+  /**
+   * Set up ElevenLabs streaming with live transcript updates and auto-execute
+   */
+  async setupElevenLabsStreaming() {
+    elevenLabsSttService.onTranscript((result) => {
+      this.captureState.pendingTranscript = result.text;
+      console.log(`[VoiceService] ElevenLabs transcript: "${result.text}" (final: ${result.isFinal})`);
+      this.emit(
+        createEvent(EventTypes.VOICE_TRANSCRIPT, {
+          text: result.text,
+          isFinal: result.isFinal
+        })
+      );
+    });
+    elevenLabsSttService.onExecute(async (transcript, reason) => {
+      console.log(`[VoiceService] Auto-execute triggered by ${reason}: "${transcript}"`);
+      this.setAppStatus("processing");
+      this.emit(
+        createEvent(EventTypes.VOICE_TRANSCRIPT, {
+          text: transcript,
+          isFinal: false,
+          isExecuting: true
+          // New flag to indicate execution in progress
+        })
+      );
+      const startTime = this.captureState.startTime;
+      const duration = startTime ? Date.now() - startTime : 0;
+      this.storeTranscript(transcript, startTime, duration);
+      const routingResult = await intentService.routeTranscript(transcript);
+      console.log(`[VoiceService] Auto-execute intent result:`, routingResult);
+      this.emit(
+        createEvent(EventTypes.VOICE_TRANSCRIPT, {
+          text: "✓ Done! Ready for next command...",
+          isFinal: false,
+          isDone: true
+          // New flag for done state
+        })
+      );
+      elevenLabsSttService.clearTranscripts();
+      setTimeout(() => {
+        if (this.captureState.isCapturing) {
+          this.setAppStatus("listening");
+          this.emit(
+            createEvent(EventTypes.VOICE_TRANSCRIPT, {
+              text: "",
+              isFinal: false
+            })
+          );
+        }
+      }, 1500);
+    });
+    const noiseSuppression = await storeService.getSetting("voice.noiseSuppression");
+    elevenLabsSttService.setNoiseSuppression(noiseSuppression === "true");
+    const connected = await elevenLabsSttService.startListening();
+    if (!connected) {
+      console.error("[VoiceService] Failed to connect to ElevenLabs STT");
     }
   }
   /**
@@ -6840,6 +7590,7 @@ class VoiceService {
     if (!this.captureState.isCapturing) return;
     const duration = this.captureState.startTime ? Date.now() - this.captureState.startTime : 0;
     const startTime = this.captureState.startTime;
+    const audioChunks = this.captureState.audioChunks;
     if (this.captureState.recording) {
       this.captureState.recording.stop();
     }
@@ -6853,10 +7604,36 @@ class VoiceService {
       return;
     }
     this.setAppStatus("processing");
-    openaiSttService.commitAudio();
-    await new Promise((resolve) => setTimeout(resolve, 2e3));
-    const transcriptText = openaiSttService.getFullTranscript() || this.captureState.pendingTranscript;
-    if (transcriptText) {
+    this.emit(
+      createEvent(EventTypes.VOICE_TRANSCRIPT, {
+        text: "⏳ Transcribing...",
+        isFinal: false
+      })
+    );
+    let transcriptText = null;
+    const sttProvider = await this.getSttProvider();
+    if (sttProvider === "elevenlabs") {
+      transcriptText = elevenLabsSttService.stopListening();
+      console.log(`[VoiceService] ElevenLabs final transcript: "${transcriptText}"`);
+    } else if (sttProvider === "groq" && audioChunks.length > 0) {
+      try {
+        const audioBuffer = Buffer.concat(audioChunks);
+        console.log(`[VoiceService] Sending ${audioBuffer.length} bytes to Groq Whisper...`);
+        const result = await groqSttService.transcribe(audioBuffer, duration);
+        transcriptText = result.text;
+        console.log(`[VoiceService] Groq transcript: "${transcriptText}"`);
+      } catch (err) {
+        console.error("[VoiceService] Groq transcription failed, falling back to OpenAI:", err);
+      }
+    }
+    if (!transcriptText) {
+      openaiSttService.commitAudio();
+      const waitTime = Math.min(5e3, Math.max(2e3, duration / 5));
+      console.log(`[VoiceService] Waiting ${waitTime}ms for OpenAI transcription...`);
+      await new Promise((resolve) => setTimeout(resolve, waitTime));
+      transcriptText = openaiSttService.getFullTranscript() || this.captureState.pendingTranscript;
+    }
+    if (transcriptText && transcriptText.trim().length > 0) {
       console.log(`[VoiceService] Final transcript: "${transcriptText}"`);
       this.storeTranscript(transcriptText, startTime, duration);
       this.emit(
@@ -6865,18 +7642,16 @@ class VoiceService {
           isFinal: true
         })
       );
-      if (transcriptText.length > 0) {
-        const routingResult = await intentService.routeTranscript(transcriptText);
-        console.log(`[VoiceService] Intent routing result:`, routingResult);
-      }
+      const routingResult = await intentService.routeTranscript(transcriptText);
+      console.log(`[VoiceService] Intent routing result:`, routingResult);
     } else {
-      const fallbackText = this.captureState.pendingTranscript || "[No transcription received]";
-      console.log(`[VoiceService] Using fallback transcript: "${fallbackText}"`);
-      if (fallbackText !== "[No transcription received]") {
-        this.storeTranscript(fallbackText, startTime, duration);
-        const routingResult = await intentService.routeTranscript(fallbackText);
-        console.log(`[VoiceService] Intent routing result:`, routingResult);
-      }
+      console.log(`[VoiceService] No transcription received`);
+      this.emit(
+        createEvent(EventTypes.VOICE_TRANSCRIPT, {
+          text: "[No speech detected]",
+          isFinal: true
+        })
+      );
     }
     this.resetCaptureState();
     this.setAppStatus("idle");
@@ -6958,7 +7733,8 @@ class VoiceService {
       isCapturing: false,
       startTime: null,
       recording: null,
-      pendingTranscript: ""
+      pendingTranscript: "",
+      audioChunks: []
     };
   }
   /**
@@ -8224,8 +9000,10 @@ function setAppStatus(newStatus) {
     tray.setToolTip(`ClipMorph - ${newStatus.charAt(0).toUpperCase() + newStatus.slice(1)}`);
   }
 }
-const COMPACT_SIZE = { width: 300, height: 44 };
+const COMPACT_SIZE = { width: 700, height: 52 };
+const COMPACT_WIDE_SIZE = { width: 700, height: 600 };
 const EXPANDED_SIZE = { width: 700, height: 600 };
+let windowMode = "compact";
 let isExpanded = false;
 function createWindow() {
   const primaryDisplay = electron.screen.getPrimaryDisplay();
@@ -8270,6 +9048,17 @@ function createWindow() {
     if (!electron.app.isQuitting) {
       event.preventDefault();
       mainWindow?.hide();
+    }
+  });
+  mainWindow.on("blur", () => {
+    console.log("[ClipMorph] Window blur event");
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      const autoCompact = settingsService.getBoolean("ui.autoCompactOnBlur");
+      console.log("[ClipMorph] Auto-compact setting:", autoCompact);
+      if (autoCompact) {
+        console.log("[ClipMorph] Sending APP_BLUR event to renderer");
+        mainWindow.webContents.send(IpcChannels.EVENTS, createEvent(EventTypes.APP_BLUR, {}));
+      }
     }
   });
   if (!electron.app.isPackaged && process.env["ELECTRON_RENDERER_URL"]) {
@@ -8356,14 +9145,31 @@ function centerWindowAtTop() {
   const y = 60;
   mainWindow.setPosition(x, y, false);
 }
-function toggleWindowSize() {
+function setWindowMode(mode) {
   if (!mainWindow) return;
   const display = electron.screen.getPrimaryDisplay();
-  isExpanded = !isExpanded;
-  const newSize = isExpanded ? EXPANDED_SIZE : COMPACT_SIZE;
+  windowMode = mode;
+  isExpanded = mode === "expanded";
+  let newSize;
+  switch (mode) {
+    case "compact":
+      newSize = COMPACT_SIZE;
+      break;
+    case "compact-wide":
+      newSize = COMPACT_WIDE_SIZE;
+      break;
+    case "expanded":
+      newSize = EXPANDED_SIZE;
+      break;
+  }
   const x = Math.round((display.bounds.width - newSize.width) / 2);
-  const y = display.workArea.y + (isExpanded ? 10 : 0);
+  const y = display.workArea.y + (mode === "expanded" ? 10 : 0);
   mainWindow.setBounds({ x, y, width: newSize.width, height: newSize.height }, true);
+}
+function toggleWindowSize() {
+  if (!mainWindow) return;
+  const newMode = windowMode === "expanded" ? "compact" : "expanded";
+  setWindowMode(newMode);
 }
 function registerIpcHandlers() {
   electron.ipcMain.handle(IpcChannels.STATUS_GET, () => {
@@ -8371,10 +9177,14 @@ function registerIpcHandlers() {
   });
   electron.ipcMain.handle("clipmorph:window:toggle", () => {
     toggleWindowSize();
-    return createSuccessResponse({ expanded: isExpanded });
+    return createSuccessResponse({ expanded: isExpanded, mode: windowMode });
   });
   electron.ipcMain.handle("clipmorph:window:getState", () => {
-    return createSuccessResponse({ expanded: isExpanded });
+    return createSuccessResponse({ expanded: isExpanded, mode: windowMode });
+  });
+  electron.ipcMain.handle("clipmorph:window:setMode", (_event, args) => {
+    setWindowMode(args.mode);
+    return createSuccessResponse({ expanded: isExpanded, mode: windowMode });
   });
   electron.ipcMain.handle(IpcChannels.PERMISSION_GET_ALL, () => {
     const permissions = getAllPermissions();
@@ -8472,7 +9282,9 @@ function registerIpcHandlers() {
   electron.ipcMain.handle(IpcChannels.CLIPBOARD_READ, () => {
     const text = clipboardService.readClipboard();
     const snapshot = clipboardService.getCurrentSnapshot();
-    return createSuccessResponse({ text, snapshot });
+    const filePaths = clipboardService.readFilePaths();
+    const formats = clipboardService.getAvailableFormats();
+    return createSuccessResponse({ text, snapshot, filePaths, formats });
   });
   electron.ipcMain.handle(
     IpcChannels.CLIPBOARD_WRITE,
