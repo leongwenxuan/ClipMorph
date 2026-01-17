@@ -557,6 +557,29 @@ export interface ClipMorphAPI {
    * @returns Promise resolving to base64 data
    */
   getImageBase64: (imagePath: string) => Promise<IpcResponse<{ base64: string; mimeType: string }>>
+
+  // ============================================================================
+  // Audio Device API
+  // ============================================================================
+
+  /**
+   * List available audio input devices
+   * @returns Promise resolving to list of audio devices
+   */
+  listInputDevices: () => Promise<IpcResponse<{ devices: { id: string; name: string }[] }>>
+
+  /**
+   * Set the audio input device
+   * @param device Device ID (empty string for system default)
+   * @returns Promise resolving to success
+   */
+  setInputDevice: (device: string) => Promise<IpcResponse<{ success: boolean }>>
+
+  /**
+   * Get the current audio input device setting
+   * @returns Promise resolving to current device ID
+   */
+  getInputDevice: () => Promise<IpcResponse<{ device: string }>>
 }
 
 // Expose a minimal, typed API to the renderer
@@ -745,6 +768,14 @@ const api: ClipMorphAPI = {
 
   getImageBase64: (imagePath: string) =>
     ipcRenderer.invoke(IpcChannels.HISTORY_GET_IMAGE, { imagePath }),
+
+  // Audio Device API
+  listInputDevices: () => ipcRenderer.invoke('voice:listInputDevices'),
+
+  setInputDevice: (device: string) =>
+    ipcRenderer.invoke('voice:setInputDevice', { device }),
+
+  getInputDevice: () => ipcRenderer.invoke('voice:getInputDevice'),
 }
 
 // Expose the API via contextBridge (secure, isolated)

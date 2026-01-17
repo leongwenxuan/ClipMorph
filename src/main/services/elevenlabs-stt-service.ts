@@ -21,7 +21,7 @@ type ExecuteCallback = (transcript: string, reason: 'pattern' | 'silence') => vo
 
 // Silence timeout for auto-execute (ms) - execute after this much silence
 // 2000ms (2 seconds) is more natural for speech pauses
-const SILENCE_TIMEOUT_MS = 1300
+const SILENCE_TIMEOUT_MS = 1100
 
 class ElevenLabsSttService {
   private ws: WebSocket | null = null
@@ -188,26 +188,38 @@ class ElevenLabsSttService {
             this.currentTranscript = message.text
             const fullText = this.getFullTranscript()
             
-            // Only reset silence timer if the text actually changed (user speaking new words)
+            // Only process if the text actually changed (user speaking new words)
             const textChanged = fullText !== this.lastTranscriptText
             if (textChanged) {
               console.log('[ElevenLabs-STT] Live:', fullText)
               this.lastTranscriptText = fullText
+              
+              // Check if this is genuinely new text (not just a repeat of what we executed)
+              // If user is speaking new words that don't match last executed command,
+              // allow execution again
+              if (this.hasExecuted && this.lastExecutedTranscript) {
+                // Only reset hasExecuted if text is substantially different
+                if (!fullText.startsWith(this.lastExecutedTranscript) && 
+                    !this.lastExecutedTranscript.startsWith(fullText)) {
+                  console.log('[ElevenLabs-STT] New command detected, enabling execution')
+                  this.hasExecuted = false
+                }
+              }
               
               // Reset silence timer - user is still speaking
               this.resetSilenceTimer()
               
               // Start new silence timer
               this.startSilenceTimer()
+              
+              // Emit to UI only when text changes
+              this.transcriptCallback?.({
+                text: fullText,
+                isFinal: false,
+                isPartial: true,
+              })
             }
-            // else: same text repeated, don't reset timer - could be natural pause
-            
-            // Always emit to UI
-            this.transcriptCallback?.({
-              text: fullText,
-              isFinal: false,
-              isPartial: true,
-            })
+            // else: same text repeated - don't log, don't emit, don't reset timer
           }
           break
 
@@ -274,7 +286,7 @@ class ElevenLabsSttService {
   private startSilenceTimer(): void {
     this.resetSilenceTimer()
     
-    this.silenceTimeout = setTimeout(() => {
+    this.silenceTimeout = setTimeout(async () => {
       if (this.isListening && !this.hasExecuted) {
         const transcript = this.getFullTranscript()
         
@@ -301,7 +313,11 @@ class ElevenLabsSttService {
           console.log(`[ElevenLabs-STT] Silence timeout (${SILENCE_TIMEOUT_MS}ms), auto-executing!`)
           this.hasExecuted = true
           this.lastExecutedTranscript = transcript
-          this.executeCallback?.(transcript, 'silence')
+          try {
+            await this.executeCallback?.(transcript, 'silence')
+          } catch (error) {
+            console.error('[ElevenLabs-STT] Execute callback error:', error)
+          }
         } else if (transcript) {
           console.log(`[ElevenLabs-STT] Transcript too short to execute: "${transcript}" (${transcript.length} chars)`)
         }
@@ -369,15 +385,16 @@ class ElevenLabsSttService {
   }
 
   /**
-   * Clear transcripts and reset state
+   * Clear transcripts and reset state (but keep execution guards)
+   * This is called after each command execution to prepare for the next one
    */
   clearTranscripts(): void {
     this.currentTranscript = ''
     this.committedTranscripts = []
-    this.hasExecuted = false
     this.lastTranscriptText = ''
-    // NOTE: Don't reset lastExecutedTranscript - we need it to prevent re-execution loops
-    // It gets cleared when stopListening() is called or when genuinely new text is detected
+    // NOTE: Don't reset hasExecuted or lastExecutedTranscript here!
+    // These protect against re-execution when ElevenLabs keeps sending old partials.
+    // They only get reset in startListening() for a truly fresh session.
     this.resetSilenceTimer()
   }
 

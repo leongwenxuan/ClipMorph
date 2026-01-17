@@ -76,6 +76,11 @@ let appStatus: AppStatus = 'idle'
  */
 function emitEvent<T>(event: ClipMorphEvent<T>): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
+    // Log important voice events to confirm they're being sent
+    if (event.type === 'VOICE_TRANSCRIPT') {
+      const payload = event.payload as { text?: string; isExecuting?: boolean; isDone?: boolean }
+      console.log(`[Main] Emitting VOICE_TRANSCRIPT: isExecuting=${payload?.isExecuting}, isDone=${payload?.isDone}, text="${payload?.text?.slice(0, 30)}..."`)
+    }
     mainWindow.webContents.send(IpcChannels.EVENTS, event)
   }
 }

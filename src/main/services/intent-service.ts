@@ -1008,28 +1008,49 @@ class IntentService {
   ): Promise<IntentRoutingResult> {
     const { intent } = classification
 
-    console.log(`[IntentService] Generating file operation preview for: "${classification.rawTranscript}"`)
+    console.log(`[IntentService] Executing file operation: "${classification.rawTranscript}"`)
 
     try {
-      // Generate a preview of the file operations
-      const result = await fileOperationService.generatePreview({
-        prompt: classification.rawTranscript,
+      // Get file paths from clipboard (if user copied files in Finder)
+      const copiedFilePaths = clipboardService.readFilePaths()
+      let prompt = classification.rawTranscript
+      
+      if (copiedFilePaths.length > 0) {
+        console.log(`[IntentService] Found ${copiedFilePaths.length} files in clipboard for file operation`)
+        // Include the file paths in the prompt so OpenCode knows what files to operate on
+        const fileList = copiedFilePaths.map(p => `  - ${p}`).join('\n')
+        prompt = `${classification.rawTranscript}\n\n## Files to operate on (from clipboard):\n${fileList}`
+      }
+      
+      // Execute directly in a single OpenCode call (no separate preview step)
+      // OpenCode will parse the intent AND execute the file operations
+      const result = await fileOperationService.executeDirectly({
+        prompt: prompt,
       })
 
-      console.log(`[IntentService] File operation preview generated: ${result.preview.id}`)
-
+      console.log(`[IntentService] File operations executed: ${result.job.successCount} success, ${result.job.failureCount} failed`)
+      
       this.updateLastAction(
         classification.rawTranscript,
         intent,
         true,
-        result.preview.id
+        result.job.id
+      )
+
+      // Store the operation
+      storeService.addOperation(
+        classification.rawTranscript,
+        'file-operation',
+        true,
+        `Completed ${result.job.successCount} file operations`,
+        result.job.id
       )
 
       return {
         intent,
         classification,
         handled: true,
-        jobId: result.preview.id,
+        jobId: result.job.id,
       }
     } catch (error) {
       const errorMsg = (error as Error).message

@@ -128,39 +128,19 @@ class BrowserAgentService {
   }
 
   /**
-   * Escape a string for shell usage (wrap in single quotes, escape internal quotes)
-   */
-  private escapeShellArg(arg: string): string {
-    // Wrap in single quotes and escape any single quotes within
-    // foo'bar becomes 'foo'\''bar'
-    return `'${arg.replace(/'/g, "'\\''")}'`
-  }
-
-  /**
    * Execute an agent-browser CLI command
+   * When shell: false, arguments are passed directly without escaping
    */
   private async execAgentBrowser(args: string[]): Promise<string> {
     return new Promise((resolve, reject) => {
       const cmd = 'npx'
-      // Escape args that might contain special characters
-      const escapedArgs = args.map((arg, i) => {
-        // First arg is the subcommand (open, fill, click, etc.) - don't escape
-        if (i === 0) return arg
-        // Refs like @e1, flags like --values, -i, --json are safe
-        if (arg.startsWith('@') || arg.startsWith('-')) return arg
-        // URLs starting with http are generally safe but may have special chars
-        if (arg.startsWith('http://') || arg.startsWith('https://')) {
-          return this.escapeShellArg(arg)
-        }
-        // Everything else (values for fill, select, etc.) should be escaped
-        // This handles spaces, quotes, apostrophes, brackets, etc.
-        return this.escapeShellArg(arg)
-      })
-      const fullArgs = ['agent-browser', ...escapedArgs]
+      // When shell: false, pass arguments directly - no escaping needed
+      const fullArgs = ['agent-browser', ...args]
       
       console.log(`[BrowserAgent] Executing: ${cmd} ${fullArgs.join(' ')}`)
       
       // Use npx to run agent-browser from node_modules
+      // Don't use shell: true - it breaks argument escaping
       const proc = spawn(cmd, fullArgs, {
         cwd: process.cwd(),
         env: { 
@@ -168,7 +148,7 @@ class BrowserAgentService {
           // Ensure PATH includes common node locations
           PATH: `${process.env.PATH}:/usr/local/bin:/opt/homebrew/bin`,
         },
-        shell: true,
+        shell: false,
         stdio: ['pipe', 'pipe', 'pipe'],
       })
 
@@ -205,6 +185,7 @@ class BrowserAgentService {
 
   /**
    * Open a URL in the browser (launches browser if not already open)
+   * The 'open' command in agent-browser handles launching automatically
    */
   async open(url: string): Promise<void> {
     console.log(`[BrowserAgent] Opening: ${url}`)

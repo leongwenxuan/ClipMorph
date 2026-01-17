@@ -164,6 +164,10 @@ const api = {
   getOperationsHistory: (limit) => electron.ipcRenderer.invoke(IpcChannels.HISTORY_GET, { limit }),
   clearOperationsHistory: () => electron.ipcRenderer.invoke(IpcChannels.HISTORY_CLEAR),
   copyImageToClipboard: (imagePath) => electron.ipcRenderer.invoke(IpcChannels.HISTORY_COPY_IMAGE, { imagePath }),
-  getImageBase64: (imagePath) => electron.ipcRenderer.invoke(IpcChannels.HISTORY_GET_IMAGE, { imagePath })
+  getImageBase64: (imagePath) => electron.ipcRenderer.invoke(IpcChannels.HISTORY_GET_IMAGE, { imagePath }),
+  // Audio Device API
+  listInputDevices: () => electron.ipcRenderer.invoke("voice:listInputDevices"),
+  setInputDevice: (device) => electron.ipcRenderer.invoke("voice:setInputDevice", { device }),
+  getInputDevice: () => electron.ipcRenderer.invoke("voice:getInputDevice")
 };
 electron.contextBridge.exposeInMainWorld("clipmorph", api);

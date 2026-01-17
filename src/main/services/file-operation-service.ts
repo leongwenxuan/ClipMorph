@@ -45,6 +45,7 @@ const MAX_HISTORY = 20
 // ============================================================================
 
 const FILE_OP_PROMPTS: Record<string, (prompt: string, targetDir?: string) => string> = {
+  // Preview only - just analyze and return JSON
   preview: (prompt: string, targetDir?: string) => `
 You are a file management assistant. Analyze the following request and generate a preview of file operations.
 
@@ -75,6 +76,39 @@ Return a JSON object with:
 IMPORTANT: Only list actual files that exist. Be conservative - when in doubt, ask for clarification.
 `,
 
+  // Execute directly - perform the operations and return results
+  executeDirectly: (prompt: string, targetDir?: string) => `
+You are a file management assistant. Execute the following file operation request.
+
+## Request
+${prompt}
+
+${targetDir ? `## Target Directory\n${targetDir}` : ''}
+
+## Instructions
+1. Parse the user's intent (organize, rename, move, delete, copy, find)
+2. EXECUTE the operations immediately using shell commands (mv, cp, rm, mkdir, etc.)
+3. Report what you did
+
+## IMPORTANT
+- Actually PERFORM the file operations, don't just list them
+- Use 'mv' for rename/move operations
+- Use 'cp' for copy operations  
+- Use 'rm' for delete operations
+- After completing, output a JSON summary
+
+## Output Format (after executing)
+Return a JSON object with:
+{
+  "executed": true,
+  "operations": [
+    { "type": "rename", "source": "/path/from", "destination": "/path/to", "success": true },
+    ...
+  ],
+  "summary": "Human-readable summary of what was done"
+}
+`,
+
   execute: (operations: string) => `
 Execute the following file operations. Be careful and report any errors.
 
@@ -82,7 +116,7 @@ Execute the following file operations. Be careful and report any errors.
 ${operations}
 
 ## Instructions
-1. Execute each operation in order
+1. Execute each operation in order using shell commands (mv, cp, rm)
 2. Stop immediately if any operation fails
 3. Report success/failure for each operation
 4. Do NOT proceed if you encounter permission errors
@@ -136,27 +170,54 @@ class FileOperationService extends EventEmitter {
     console.log(`[FileOperationService] Generating preview for: "${request.prompt}"`)
 
     try {
-      // Run OpenCode to analyze the request
+      // Run OpenCode to analyze the request and WAIT for completion
       const result = await openCodeService.runTask({
         prompt,
         cwd: request.targetDir,
       })
 
-      // Wait for completion and parse result
-      // For MVP, we'll create a mock preview since we can't easily capture OpenCode output
-      // In production, this would parse the actual OpenCode response
+      // Parse operations from OpenCode's output
+      let operations: FileOperationItem[] = []
+      let summary = ''
+      
+      if (result.output) {
+        // Try to extract JSON from the output
+        // Look for JSON block in markdown code fence or raw JSON
+        const jsonMatch = result.output.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || 
+                          result.output.match(/(\{[\s\S]*"operations"[\s\S]*\})/)
+        
+        if (jsonMatch) {
+          try {
+            const parsed = JSON.parse(jsonMatch[1])
+            if (parsed.operations && Array.isArray(parsed.operations)) {
+              operations = parsed.operations.map((op: Record<string, unknown>) => ({
+                type: op.type as string,
+                source: op.source as string,
+                destination: op.destination as string | undefined,
+                destructive: Boolean(op.destructive),
+              }))
+              summary = parsed.summary || `${operations.length} file operations`
+              console.log(`[FileOperationService] Parsed ${operations.length} operations from OpenCode output`)
+            }
+          } catch (parseError) {
+            console.error('[FileOperationService] Failed to parse JSON from OpenCode:', parseError)
+          }
+        }
+      }
       
       const now = Date.now()
       const previewId = crypto.randomUUID()
 
-      // Create a simplified preview (in production, this would be parsed from OpenCode output)
+      // Check if any operations are destructive (delete)
+      const hasDestructive = operations.some(op => op.destructive || op.type === 'delete')
+
       const preview: FileOperationPreview = {
         id: previewId,
-        operations: [], // Would be populated from OpenCode response
-        fileCount: 0,
+        operations,
+        fileCount: operations.length,
         folderCount: 0,
-        hasDestructive: false,
-        summary: `Analyzing: "${request.prompt}". Waiting for OpenCode to generate preview...`,
+        hasDestructive,
+        summary: summary || `${operations.length} file operations`,
         prompt: request.prompt,
         createdAt: now,
         expiresAt: now + PREVIEW_EXPIRY_MS,
@@ -173,11 +234,130 @@ class FileOperationService extends EventEmitter {
         createEvent<FileOpPreviewReadyPayload>(EventTypes.FILE_OP_PREVIEW_READY, { preview })
       )
 
-      console.log(`[FileOperationService] Preview ${previewId} generated`)
+      console.log(`[FileOperationService] Preview ${previewId} generated with ${operations.length} operations`)
 
       return { preview }
     } catch (error) {
       throw new Error(`Failed to generate preview: ${(error as Error).message}`)
+    }
+  }
+
+  /**
+   * Execute file operations directly (single OpenCode call - no separate preview)
+   * This is the recommended method for non-destructive operations
+   */
+  async executeDirectly(request: FileOpPreviewRequest): Promise<FileOpExecuteResponse> {
+    const openCodeService = getOpenCodeService()
+
+    // Build prompt that tells OpenCode to EXECUTE, not just preview
+    const prompt = FILE_OP_PROMPTS.executeDirectly(request.prompt, request.targetDir)
+
+    console.log(`[FileOperationService] Executing directly: "${request.prompt}"`)
+
+    const now = Date.now()
+    const jobId = crypto.randomUUID()
+
+    // Create job
+    const job: FileOperationJob = {
+      id: jobId,
+      type: 'file-operation',
+      status: 'running',
+      createdAt: now,
+      updatedAt: now,
+      operationType: 'rename', // Will be updated from result
+      previewId: '',
+      operations: [],
+      successCount: 0,
+      failureCount: 0,
+      prompt: request.prompt,
+      requiredApproval: false,
+    }
+
+    this.activeJob = job
+
+    // Emit started event
+    this.emit(
+      createEvent<FileOpStartedPayload>(EventTypes.FILE_OP_STARTED, { job })
+    )
+
+    try {
+      // Run OpenCode to execute the operations directly
+      // Enable auto-approve since we handle destructive checks ourselves
+      const result = await openCodeService.runTask({
+        prompt,
+        cwd: request.targetDir,
+        autoApprove: true,
+      })
+
+      // Parse results from OpenCode's output
+      let operations: FileOperationItem[] = []
+      let summary = ''
+      
+      if (result.output) {
+        // Try to extract JSON from the output
+        const jsonMatch = result.output.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || 
+                          result.output.match(/(\{[\s\S]*"operations"[\s\S]*\})/)
+        
+        if (jsonMatch) {
+          try {
+            const parsed = JSON.parse(jsonMatch[1])
+            if (parsed.operations && Array.isArray(parsed.operations)) {
+              operations = parsed.operations.map((op: Record<string, unknown>) => ({
+                type: op.type as string,
+                source: op.source as string,
+                destination: op.destination as string | undefined,
+                destructive: Boolean(op.destructive),
+              }))
+              summary = parsed.summary || `${operations.length} file operations executed`
+              
+              // Count successes/failures
+              for (const op of parsed.operations) {
+                if (op.success !== false) {
+                  job.successCount++
+                } else {
+                  job.failureCount++
+                }
+              }
+            }
+          } catch (parseError) {
+            console.error('[FileOperationService] Failed to parse JSON from OpenCode:', parseError)
+          }
+        }
+      }
+
+      job.operations = operations
+      job.operationType = this.determineOperationType(operations)
+      job.status = 'completed'
+      job.updatedAt = Date.now()
+
+      // Add to history for undo
+      this.addToHistory(job)
+
+      // Emit completed event
+      this.emit(
+        createEvent<FileOpCompletedPayload>(EventTypes.FILE_OP_COMPLETED, { job })
+      )
+
+      console.log(`[FileOperationService] Direct execution completed: ${job.successCount} success, ${job.failureCount} failed`)
+
+      this.activeJob = null
+      return { job }
+    } catch (error) {
+      job.status = 'failed'
+      job.error = { code: 'FILE_OP_FAILED', message: (error as Error).message }
+      job.updatedAt = Date.now()
+
+      this.emit(
+        createEvent<FileOpFailedPayload>(EventTypes.FILE_OP_FAILED, {
+          jobId: job.id,
+          error: (error as Error).message,
+        })
+      )
+
+      console.error(`[FileOperationService] Direct execution failed:`, error)
+
+      this.activeJob = null
+      throw error
     }
   }
 
@@ -228,15 +408,50 @@ class FileOperationService extends EventEmitter {
     console.log(`[FileOperationService] Executing job ${job.id} with ${preview.operations.length} operations`)
 
     try {
-      // Execute via OpenCode
-      const openCodeService = getOpenCodeService()
-      const executePrompt = FILE_OP_PROMPTS.execute(JSON.stringify(preview.operations, null, 2))
+      // Execute operations directly using Node.js fs
+      const fs = await import('fs/promises')
+      const path = await import('path')
+      
+      for (const op of preview.operations) {
+        try {
+          switch (op.type) {
+            case 'rename':
+            case 'move':
+              if (op.destination) {
+                // Ensure destination directory exists
+                const destDir = path.dirname(op.destination)
+                await fs.mkdir(destDir, { recursive: true })
+                await fs.rename(op.source, op.destination)
+                console.log(`[FileOperationService] Renamed: ${op.source} -> ${op.destination}`)
+                job.successCount++
+              }
+              break
+            case 'copy':
+              if (op.destination) {
+                const destDir = path.dirname(op.destination)
+                await fs.mkdir(destDir, { recursive: true })
+                await fs.copyFile(op.source, op.destination)
+                console.log(`[FileOperationService] Copied: ${op.source} -> ${op.destination}`)
+                job.successCount++
+              }
+              break
+            case 'delete':
+              await fs.unlink(op.source)
+              console.log(`[FileOperationService] Deleted: ${op.source}`)
+              job.successCount++
+              break
+            default:
+              console.warn(`[FileOperationService] Unknown operation type: ${op.type}`)
+              job.failureCount++
+          }
+        } catch (opError) {
+          console.error(`[FileOperationService] Operation failed:`, opError)
+          job.failureCount++
+        }
+      }
 
-      await openCodeService.runTask({ prompt: executePrompt })
-
-      // Mark as completed (in production, would parse results)
-      job.status = 'completed'
-      job.successCount = preview.operations.length
+      // Mark as completed
+      job.status = job.failureCount === 0 ? 'completed' : 'completed'
       job.updatedAt = Date.now()
 
       // Add to history for undo
@@ -250,7 +465,7 @@ class FileOperationService extends EventEmitter {
         createEvent<FileOpCompletedPayload>(EventTypes.FILE_OP_COMPLETED, { job })
       )
 
-      console.log(`[FileOperationService] Job ${job.id} completed`)
+      console.log(`[FileOperationService] Job ${job.id} completed: ${job.successCount} success, ${job.failureCount} failed`)
 
       this.activeJob = null
       return { job }

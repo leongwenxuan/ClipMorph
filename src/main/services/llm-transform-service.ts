@@ -1,12 +1,16 @@
 /**
  * LLM Transform Service - AI-powered clipboard transformations
  *
- * Uses OpenAI to understand and execute arbitrary text transformations.
- * No need to predefine transforms - the LLM figures out what to do.
+ * Uses Cerebras (preferred for speed) or OpenAI to understand and execute 
+ * arbitrary text transformations. No need to predefine transforms - the LLM 
+ * figures out what to do.
  */
 
 import OpenAI from 'openai'
 import { secretsService } from './secrets-service'
+
+// Cerebras API endpoint
+const CEREBRAS_BASE_URL = 'https://api.cerebras.ai/v1'
 
 export interface LLMTransformResult {
   success: boolean
@@ -15,28 +19,54 @@ export interface LLMTransformResult {
   error?: string
 }
 
+interface ClientInfo {
+  client: OpenAI
+  model: string
+  provider: 'cerebras' | 'openai'
+}
+
 class LLMTransformService {
-  private client: OpenAI | null = null
-  private apiKey: string | null = null
+  private cerebrasClient: OpenAI | null = null
+  private openaiClient: OpenAI | null = null
+  private cerebrasKey: string | null = null
+  private openaiKey: string | null = null
 
   /**
-   * Initialize or get the OpenAI client
+   * Get best available client (Cerebras preferred for speed)
    */
-  private async getClient(): Promise<OpenAI> {
-    // Check if we need to refresh the API key
-    const currentKey = await secretsService.getOpenAIKey()
-    
-    if (!currentKey) {
-      throw new Error('OpenAI API key not configured. Set it in Settings.')
+  private async getClient(): Promise<ClientInfo> {
+    // Try Cerebras first (much faster: ~2100 tokens/s vs ~100 tokens/s)
+    const cerebrasKey = await secretsService.getCerebrasKey()
+    if (cerebrasKey) {
+      if (!this.cerebrasClient || this.cerebrasKey !== cerebrasKey) {
+        this.cerebrasKey = cerebrasKey
+        this.cerebrasClient = new OpenAI({
+          apiKey: cerebrasKey,
+          baseURL: CEREBRAS_BASE_URL,
+        })
+      }
+      return { 
+        client: this.cerebrasClient, 
+        model: 'gpt-oss-120b', // 120B params, ~3000 tok/s
+        provider: 'cerebras'
+      }
     }
 
-    // Create new client if key changed or doesn't exist
-    if (!this.client || this.apiKey !== currentKey) {
-      this.apiKey = currentKey
-      this.client = new OpenAI({ apiKey: currentKey })
+    // Fall back to OpenAI
+    const openaiKey = await secretsService.getOpenAIKey()
+    if (openaiKey) {
+      if (!this.openaiClient || this.openaiKey !== openaiKey) {
+        this.openaiKey = openaiKey
+        this.openaiClient = new OpenAI({ apiKey: openaiKey })
+      }
+      return { 
+        client: this.openaiClient, 
+        model: 'gpt-4o-mini',
+        provider: 'openai'
+      }
     }
 
-    return this.client
+    throw new Error('No API key configured. Set Cerebras or OpenAI key in Settings.')
   }
 
   /**
@@ -81,9 +111,9 @@ class LLMTransformService {
     }
 
     try {
-      console.log('[LLMTransformService] Getting OpenAI client...')
-      const client = await this.getClient()
-      console.log('[LLMTransformService] Client obtained, calling API...')
+      console.log('[LLMTransformService] Getting LLM client...')
+      const { client, model, provider } = await this.getClient()
+      console.log(`[LLMTransformService] Using ${provider} (${model}), calling API...`)
       const isTabular = this.isTabularContent(text, html)
 
       // Build content to send - prefer HTML for tables as it has structure
@@ -112,12 +142,17 @@ Value1\tValue2\tValue3`
         }
       }
 
-      const response = await client.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [
-          {
-            role: 'system',
-            content: `You are a text transformation assistant. The user will give you a command and some text.
+      // Create abort controller for timeout
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 15000) // 15 second timeout
+
+      try {
+        const response = await client.chat.completions.create({
+          model,
+          messages: [
+            {
+              role: 'system',
+              content: `You are a text transformation assistant. The user will give you a command and some text.
 Your job is to transform the text according to the command and return ONLY the transformed result.
 
 Rules:
@@ -136,37 +171,53 @@ Examples:
 - "pretty json" → format JSON with indentation
 - "extract emails" → pull out email addresses
 - "clean url" → remove tracking parameters from URLs`,
-          },
-          {
-            role: 'user',
-            content: `Command: ${command}
+            },
+            {
+              role: 'user',
+              content: `Command: ${command}
 
 Text to transform:
 ${contentToTransform}`,
-          },
-        ],
-        temperature: 0.3, // Lower temperature for more consistent results
-        max_tokens: 4096,
-      })
+            },
+          ],
+          temperature: 0.3, // Lower temperature for more consistent results
+          max_tokens: 4096,
+        }, { signal: controller.signal })
 
-      const output = response.choices[0]?.message?.content?.trim()
-      console.log(`[LLMTransformService] API response received, output length: ${output?.length || 0}`)
+        clearTimeout(timeoutId)
 
-      if (!output) {
-        console.log('[LLMTransformService] Empty response from LLM')
-        return {
-          success: false,
-          input: text,
-          output: '',
-          error: 'LLM returned empty response',
+        const output = response.choices[0]?.message?.content?.trim()
+        console.log(`[LLMTransformService] API response received, output length: ${output?.length || 0}`)
+
+        if (!output) {
+          console.log('[LLMTransformService] Empty response from LLM')
+          return {
+            success: false,
+            input: text,
+            output: '',
+            error: 'LLM returned empty response',
+          }
         }
-      }
 
-      console.log(`[LLMTransformService] Transform successful, output preview: "${output.substring(0, 100)}..."`)
-      return {
-        success: true,
-        input: text,
-        output,
+        console.log(`[LLMTransformService] Transform successful, output preview: "${output.substring(0, 100)}..."`)
+        return {
+          success: true,
+          input: text,
+          output,
+        }
+      } catch (apiError) {
+        clearTimeout(timeoutId)
+        // Check if it was a timeout
+        if (apiError instanceof Error && apiError.name === 'AbortError') {
+          console.error('[LLMTransformService] API call timed out after 15s')
+          return {
+            success: false,
+            input: text,
+            output: '',
+            error: 'API call timed out',
+          }
+        }
+        throw apiError // Re-throw for outer catch
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
@@ -186,8 +237,9 @@ ${contentToTransform}`,
    * Check if the service is available (has API key)
    */
   async isAvailable(): Promise<boolean> {
-    const key = await secretsService.getOpenAIKey()
-    return !!key
+    const cerebrasKey = await secretsService.getCerebrasKey()
+    const openaiKey = await secretsService.getOpenAIKey()
+    return !!(cerebrasKey || openaiKey)
   }
 }
 

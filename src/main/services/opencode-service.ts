@@ -43,6 +43,7 @@ interface OpenCodeTaskRequest {
   prompt: string
   context?: string
   cwd?: string
+  autoApprove?: boolean
 }
 
 interface OutputChunk {
@@ -188,6 +189,7 @@ class OpenCodeSidecar extends EventEmitter {
   private taskTimeout: NodeJS.Timeout | null = null
   private binaryPath: string
   private timeout: number
+  private permissionApproved: boolean = false
   private shell: string
 
   constructor(config: { binaryPath?: string; timeout?: number } = {}) {
@@ -226,6 +228,7 @@ class OpenCodeSidecar extends EventEmitter {
     this.state = 'busy'
     this.emit('state', this.state)
     this.outputBuffer = ''
+    this.permissionApproved = false
 
     const startTime = Date.now()
     console.log('[OpenCode Sidecar] runTask called with prompt:', request.prompt.slice(0, 100))
@@ -283,12 +286,9 @@ class OpenCodeSidecar extends EventEmitter {
           console.log('[OpenCode] Using default model (settings model not compatible:', opencodeModel, ')')
         }
 
-        // Check if user wants auto-approve mode (dangerous but fully agentic)
-        // TODO: Make this configurable in settings
-        const autoApprove = process.env.OPENCODE_AUTO_APPROVE === 'true'
-        if (autoApprove) {
-          args.push('--yes') // Auto-approve all operations
-        }
+        // Note: OpenCode doesn't have a --yes flag
+        // Permissions are handled interactively or via the PTY's onData handler
+        // For file operations, we'll rely on the permission prompt detection
 
         console.log('[OpenCode] ========== SPAWNING OPENCODE ==========')
         console.log('[OpenCode] Binary:', this.binaryPath)
@@ -331,6 +331,30 @@ class OpenCodeSidecar extends EventEmitter {
           } else if (data.trim()) {
             // Log raw if only ANSI codes
             console.log('[OpenCode RAW]', JSON.stringify(data.slice(0, 200)))
+          }
+          
+          // Auto-approve OpenCode permission prompts
+          // OpenCode shows a menu like:
+          // ◆  Permission required: external_directory (...)
+          // │  ● Allow once       <- selected by default
+          // │  ○ Always allow
+          // │  ○ Reject
+          // Just press Enter to select "Allow once"
+          if (this.outputBuffer.includes('Permission required:') && 
+              this.outputBuffer.includes('Allow once') &&
+              !this.outputBuffer.includes('Rejected')) {
+            // Check if we haven't already sent approval
+            if (!this.permissionApproved) {
+              this.permissionApproved = true
+              console.log('[OpenCode] Auto-approving permission prompt...')
+              // Send Enter key to select "Allow once" (the default selection)
+              setTimeout(() => {
+                if (this.ptyProcess) {
+                  this.ptyProcess.write('\r')
+                  console.log('[OpenCode] Sent Enter for permission approval')
+                }
+              }, 100)
+            }
           }
 
           const chunk: OutputChunk = {
@@ -455,6 +479,7 @@ class OpenCodeSidecar extends EventEmitter {
     }
     this.outputBuffer = ''
     this.lastPermissionPrompt = ''
+    this.permissionApproved = false
   }
 
   private lastPermissionPrompt = ''

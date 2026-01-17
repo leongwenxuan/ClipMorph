@@ -173,6 +173,11 @@ function Settings({ onClose }: SettingsProps): JSX.Element {
   const [elevenLabsKeyError, setElevenLabsKeyError] = useState<string | null>(null)
   const [elevenLabsKeySaving, setElevenLabsKeySaving] = useState(false)
 
+  // Audio device state
+  const [audioDevices, setAudioDevices] = useState<{ id: string; name: string }[]>([])
+  const [currentAudioDevice, setCurrentAudioDevice] = useState<string>('')
+  const [loadingDevices, setLoadingDevices] = useState(false)
+
   useEffect(() => {
     const fetchSettings = async (): Promise<void> => {
       try {
@@ -235,6 +240,18 @@ function Settings({ onClose }: SettingsProps): JSX.Element {
         if (isIpcSuccess(elevenLabsResponse)) {
           setHasElevenLabsKey(elevenLabsResponse.data.hasValue)
           setMaskedElevenLabsKey(elevenLabsResponse.data.maskedValue || null)
+        }
+
+        // Fetch audio input devices
+        const devicesResponse = await window.clipmorph.listInputDevices()
+        if (isIpcSuccess(devicesResponse)) {
+          setAudioDevices(devicesResponse.data.devices || [])
+        }
+
+        // Fetch current audio device setting
+        const deviceResponse = await window.clipmorph.getInputDevice()
+        if (isIpcSuccess(deviceResponse)) {
+          setCurrentAudioDevice(deviceResponse.data.device || '')
         }
       } catch (err) {
         console.error('Failed to fetch settings:', err)
@@ -1634,6 +1651,44 @@ function Settings({ onClose }: SettingsProps): JSX.Element {
 
           <section className="settings-section">
             <h3>Voice Settings</h3>
+            <div className="setting-row">
+              <label>Audio Input Device</label>
+              <div className="select-with-refresh">
+                <select
+                  value={currentAudioDevice}
+                  onChange={async (e) => {
+                    const device = e.target.value
+                    setCurrentAudioDevice(device)
+                    await window.clipmorph.setInputDevice(device)
+                  }}
+                  disabled={loadingDevices}
+                >
+                  <option value="">System Default</option>
+                  {audioDevices.map((device) => (
+                    <option key={device.id} value={device.id}>
+                      {device.name}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  className="refresh-devices-btn"
+                  onClick={async () => {
+                    setLoadingDevices(true)
+                    const response = await window.clipmorph.listInputDevices()
+                    if (isIpcSuccess(response)) {
+                      setAudioDevices(response.data.devices || [])
+                    }
+                    setLoadingDevices(false)
+                  }}
+                  disabled={loadingDevices}
+                  title="Refresh device list"
+                >
+                  {loadingDevices ? '...' : '↻'}
+                </button>
+              </div>
+            </div>
+            <p className="settings-hint">Select your microphone. Refresh after connecting Bluetooth devices.</p>
+            
             <div className="setting-row">
               <label>Noise Suppression</label>
               <button

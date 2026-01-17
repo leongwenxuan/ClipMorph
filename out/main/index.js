@@ -1,4 +1,26 @@
 "use strict";
+var __create = Object.create;
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
 Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
 const electron = require("electron");
 const path = require("path");
@@ -2247,22 +2269,45 @@ class SecretsService {
   }
 }
 const secretsService = new SecretsService();
+const CEREBRAS_BASE_URL$1 = "https://api.cerebras.ai/v1";
 class LLMTransformService {
-  client = null;
-  apiKey = null;
+  cerebrasClient = null;
+  openaiClient = null;
+  cerebrasKey = null;
+  openaiKey = null;
   /**
-   * Initialize or get the OpenAI client
+   * Get best available client (Cerebras preferred for speed)
    */
   async getClient() {
-    const currentKey = await secretsService.getOpenAIKey();
-    if (!currentKey) {
-      throw new Error("OpenAI API key not configured. Set it in Settings.");
+    const cerebrasKey = await secretsService.getCerebrasKey();
+    if (cerebrasKey) {
+      if (!this.cerebrasClient || this.cerebrasKey !== cerebrasKey) {
+        this.cerebrasKey = cerebrasKey;
+        this.cerebrasClient = new OpenAI({
+          apiKey: cerebrasKey,
+          baseURL: CEREBRAS_BASE_URL$1
+        });
+      }
+      return {
+        client: this.cerebrasClient,
+        model: "gpt-oss-120b",
+        // 120B params, ~3000 tok/s
+        provider: "cerebras"
+      };
     }
-    if (!this.client || this.apiKey !== currentKey) {
-      this.apiKey = currentKey;
-      this.client = new OpenAI({ apiKey: currentKey });
+    const openaiKey = await secretsService.getOpenAIKey();
+    if (openaiKey) {
+      if (!this.openaiClient || this.openaiKey !== openaiKey) {
+        this.openaiKey = openaiKey;
+        this.openaiClient = new OpenAI({ apiKey: openaiKey });
+      }
+      return {
+        client: this.openaiClient,
+        model: "gpt-4o-mini",
+        provider: "openai"
+      };
     }
-    return this.client;
+    throw new Error("No API key configured. Set Cerebras or OpenAI key in Settings.");
   }
   /**
    * Detect if content is tabular (TSV from Excel/Sheets or HTML table)
@@ -2300,9 +2345,9 @@ class LLMTransformService {
       };
     }
     try {
-      console.log("[LLMTransformService] Getting OpenAI client...");
-      const client = await this.getClient();
-      console.log("[LLMTransformService] Client obtained, calling API...");
+      console.log("[LLMTransformService] Getting LLM client...");
+      const { client, model, provider } = await this.getClient();
+      console.log(`[LLMTransformService] Using ${provider} (${model}), calling API...`);
       const isTabular = this.isTabularContent(text, html);
       let contentToTransform = text;
       let formatHint = "";
@@ -2334,12 +2379,15 @@ IMPORTANT: The input is TAB-SEPARATED tabular data. Preserve the TSV format in y
 - NO markdown table syntax`;
         }
       }
-      const response = await client.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `You are a text transformation assistant. The user will give you a command and some text.
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15e3);
+      try {
+        const response = await client.chat.completions.create({
+          model,
+          messages: [
+            {
+              role: "system",
+              content: `You are a text transformation assistant. The user will give you a command and some text.
 Your job is to transform the text according to the command and return ONLY the transformed result.
 
 Rules:
@@ -2358,36 +2406,50 @@ Examples:
 - "pretty json" → format JSON with indentation
 - "extract emails" → pull out email addresses
 - "clean url" → remove tracking parameters from URLs`
-          },
-          {
-            role: "user",
-            content: `Command: ${command}
+            },
+            {
+              role: "user",
+              content: `Command: ${command}
 
 Text to transform:
 ${contentToTransform}`
-          }
-        ],
-        temperature: 0.3,
-        // Lower temperature for more consistent results
-        max_tokens: 4096
-      });
-      const output = response.choices[0]?.message?.content?.trim();
-      console.log(`[LLMTransformService] API response received, output length: ${output?.length || 0}`);
-      if (!output) {
-        console.log("[LLMTransformService] Empty response from LLM");
+            }
+          ],
+          temperature: 0.3,
+          // Lower temperature for more consistent results
+          max_tokens: 4096
+        }, { signal: controller.signal });
+        clearTimeout(timeoutId);
+        const output = response.choices[0]?.message?.content?.trim();
+        console.log(`[LLMTransformService] API response received, output length: ${output?.length || 0}`);
+        if (!output) {
+          console.log("[LLMTransformService] Empty response from LLM");
+          return {
+            success: false,
+            input: text,
+            output: "",
+            error: "LLM returned empty response"
+          };
+        }
+        console.log(`[LLMTransformService] Transform successful, output preview: "${output.substring(0, 100)}..."`);
         return {
-          success: false,
+          success: true,
           input: text,
-          output: "",
-          error: "LLM returned empty response"
+          output
         };
+      } catch (apiError) {
+        clearTimeout(timeoutId);
+        if (apiError instanceof Error && apiError.name === "AbortError") {
+          console.error("[LLMTransformService] API call timed out after 15s");
+          return {
+            success: false,
+            input: text,
+            output: "",
+            error: "API call timed out"
+          };
+        }
+        throw apiError;
       }
-      console.log(`[LLMTransformService] Transform successful, output preview: "${output.substring(0, 100)}..."`);
-      return {
-        success: true,
-        input: text,
-        output
-      };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.error("[LLMTransformService] Transform failed:", errorMessage);
@@ -2404,8 +2466,9 @@ ${contentToTransform}`
    * Check if the service is available (has API key)
    */
   async isAvailable() {
-    const key = await secretsService.getOpenAIKey();
-    return !!key;
+    const cerebrasKey = await secretsService.getCerebrasKey();
+    const openaiKey = await secretsService.getOpenAIKey();
+    return !!(cerebrasKey || openaiKey);
   }
 }
 const llmTransformService = new LLMTransformService();
@@ -2459,26 +2522,13 @@ class BrowserAgentService {
     return { client: this.openaiClient, model: "gpt-4o" };
   }
   /**
-   * Escape a string for shell usage (wrap in single quotes, escape internal quotes)
-   */
-  escapeShellArg(arg) {
-    return `'${arg.replace(/'/g, "'\\''")}'`;
-  }
-  /**
    * Execute an agent-browser CLI command
+   * When shell: false, arguments are passed directly without escaping
    */
   async execAgentBrowser(args) {
     return new Promise((resolve, reject) => {
       const cmd = "npx";
-      const escapedArgs = args.map((arg, i) => {
-        if (i === 0) return arg;
-        if (arg.startsWith("@") || arg.startsWith("-")) return arg;
-        if (arg.startsWith("http://") || arg.startsWith("https://")) {
-          return this.escapeShellArg(arg);
-        }
-        return this.escapeShellArg(arg);
-      });
-      const fullArgs = ["agent-browser", ...escapedArgs];
+      const fullArgs = ["agent-browser", ...args];
       console.log(`[BrowserAgent] Executing: ${cmd} ${fullArgs.join(" ")}`);
       const proc = child_process.spawn(cmd, fullArgs, {
         cwd: process.cwd(),
@@ -2487,7 +2537,7 @@ class BrowserAgentService {
           // Ensure PATH includes common node locations
           PATH: `${process.env.PATH}:/usr/local/bin:/opt/homebrew/bin`
         },
-        shell: true,
+        shell: false,
         stdio: ["pipe", "pipe", "pipe"]
       });
       let stdout = "";
@@ -2518,6 +2568,7 @@ class BrowserAgentService {
   }
   /**
    * Open a URL in the browser (launches browser if not already open)
+   * The 'open' command in agent-browser handles launching automatically
    */
   async open(url) {
     console.log(`[BrowserAgent] Opening: ${url}`);
@@ -3237,6 +3288,7 @@ class OpenCodeSidecar extends events.EventEmitter {
   taskTimeout = null;
   binaryPath;
   timeout;
+  permissionApproved = false;
   shell;
   constructor(config = {}) {
     super();
@@ -3267,6 +3319,7 @@ class OpenCodeSidecar extends events.EventEmitter {
     this.state = "busy";
     this.emit("state", this.state);
     this.outputBuffer = "";
+    this.permissionApproved = false;
     const startTime = Date.now();
     console.log("[OpenCode Sidecar] runTask called with prompt:", request.prompt.slice(0, 100));
     const selectedProvider = settingsService.get("opencode.provider") || "anthropic";
@@ -3298,10 +3351,6 @@ class OpenCodeSidecar extends events.EventEmitter {
           console.log("[OpenCode] Using model:", opencodeModel);
         } else {
           console.log("[OpenCode] Using default model (settings model not compatible:", opencodeModel, ")");
-        }
-        const autoApprove = process.env.OPENCODE_AUTO_APPROVE === "true";
-        if (autoApprove) {
-          args.push("--yes");
         }
         console.log("[OpenCode] ========== SPAWNING OPENCODE ==========");
         console.log("[OpenCode] Binary:", this.binaryPath);
@@ -3336,6 +3385,18 @@ class OpenCodeSidecar extends events.EventEmitter {
             console.log("[OpenCode OUTPUT]", cleanData);
           } else if (data.trim()) {
             console.log("[OpenCode RAW]", JSON.stringify(data.slice(0, 200)));
+          }
+          if (this.outputBuffer.includes("Permission required:") && this.outputBuffer.includes("Allow once") && !this.outputBuffer.includes("Rejected")) {
+            if (!this.permissionApproved) {
+              this.permissionApproved = true;
+              console.log("[OpenCode] Auto-approving permission prompt...");
+              setTimeout(() => {
+                if (this.ptyProcess) {
+                  this.ptyProcess.write("\r");
+                  console.log("[OpenCode] Sent Enter for permission approval");
+                }
+              }, 100);
+            }
           }
           const chunk = {
             type: "stdout",
@@ -3439,6 +3500,7 @@ class OpenCodeSidecar extends events.EventEmitter {
     }
     this.outputBuffer = "";
     this.lastPermissionPrompt = "";
+    this.permissionApproved = false;
   }
   lastPermissionPrompt = "";
   /**
@@ -4420,6 +4482,7 @@ const PREVIEW_EXPIRY_MS = 5 * 60 * 1e3;
 const UNDO_EXPIRY_MS = 5 * 60 * 1e3;
 const MAX_HISTORY = 20;
 const FILE_OP_PROMPTS = {
+  // Preview only - just analyze and return JSON
   preview: (prompt, targetDir) => `
 You are a file management assistant. Analyze the following request and generate a preview of file operations.
 
@@ -4450,6 +4513,39 @@ Return a JSON object with:
 
 IMPORTANT: Only list actual files that exist. Be conservative - when in doubt, ask for clarification.
 `,
+  // Execute directly - perform the operations and return results
+  executeDirectly: (prompt, targetDir) => `
+You are a file management assistant. Execute the following file operation request.
+
+## Request
+${prompt}
+
+${targetDir ? `## Target Directory
+${targetDir}` : ""}
+
+## Instructions
+1. Parse the user's intent (organize, rename, move, delete, copy, find)
+2. EXECUTE the operations immediately using shell commands (mv, cp, rm, mkdir, etc.)
+3. Report what you did
+
+## IMPORTANT
+- Actually PERFORM the file operations, don't just list them
+- Use 'mv' for rename/move operations
+- Use 'cp' for copy operations  
+- Use 'rm' for delete operations
+- After completing, output a JSON summary
+
+## Output Format (after executing)
+Return a JSON object with:
+{
+  "executed": true,
+  "operations": [
+    { "type": "rename", "source": "/path/from", "destination": "/path/to", "success": true },
+    ...
+  ],
+  "summary": "Human-readable summary of what was done"
+}
+`,
   execute: (operations) => `
 Execute the following file operations. Be careful and report any errors.
 
@@ -4457,7 +4553,7 @@ Execute the following file operations. Be careful and report any errors.
 ${operations}
 
 ## Instructions
-1. Execute each operation in order
+1. Execute each operation in order using shell commands (mv, cp, rm)
 2. Stop immediately if any operation fails
 3. Report success/failure for each operation
 4. Do NOT proceed if you encounter permission errors
@@ -4503,16 +4599,38 @@ class FileOperationService extends events.EventEmitter {
         prompt,
         cwd: request.targetDir
       });
+      let operations = [];
+      let summary = "";
+      if (result.output) {
+        const jsonMatch = result.output.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || result.output.match(/(\{[\s\S]*"operations"[\s\S]*\})/);
+        if (jsonMatch) {
+          try {
+            const parsed = JSON.parse(jsonMatch[1]);
+            if (parsed.operations && Array.isArray(parsed.operations)) {
+              operations = parsed.operations.map((op) => ({
+                type: op.type,
+                source: op.source,
+                destination: op.destination,
+                destructive: Boolean(op.destructive)
+              }));
+              summary = parsed.summary || `${operations.length} file operations`;
+              console.log(`[FileOperationService] Parsed ${operations.length} operations from OpenCode output`);
+            }
+          } catch (parseError) {
+            console.error("[FileOperationService] Failed to parse JSON from OpenCode:", parseError);
+          }
+        }
+      }
       const now = Date.now();
       const previewId = crypto.randomUUID();
+      const hasDestructive = operations.some((op) => op.destructive || op.type === "delete");
       const preview = {
         id: previewId,
-        operations: [],
-        // Would be populated from OpenCode response
-        fileCount: 0,
+        operations,
+        fileCount: operations.length,
         folderCount: 0,
-        hasDestructive: false,
-        summary: `Analyzing: "${request.prompt}". Waiting for OpenCode to generate preview...`,
+        hasDestructive,
+        summary: summary || `${operations.length} file operations`,
         prompt: request.prompt,
         createdAt: now,
         expiresAt: now + PREVIEW_EXPIRY_MS
@@ -4522,10 +4640,99 @@ class FileOperationService extends events.EventEmitter {
       this.emit(
         createEvent(EventTypes.FILE_OP_PREVIEW_READY, { preview })
       );
-      console.log(`[FileOperationService] Preview ${previewId} generated`);
+      console.log(`[FileOperationService] Preview ${previewId} generated with ${operations.length} operations`);
       return { preview };
     } catch (error) {
       throw new Error(`Failed to generate preview: ${error.message}`);
+    }
+  }
+  /**
+   * Execute file operations directly (single OpenCode call - no separate preview)
+   * This is the recommended method for non-destructive operations
+   */
+  async executeDirectly(request) {
+    const openCodeService = getOpenCodeService();
+    const prompt = FILE_OP_PROMPTS.executeDirectly(request.prompt, request.targetDir);
+    console.log(`[FileOperationService] Executing directly: "${request.prompt}"`);
+    const now = Date.now();
+    const jobId = crypto.randomUUID();
+    const job = {
+      id: jobId,
+      type: "file-operation",
+      status: "running",
+      createdAt: now,
+      updatedAt: now,
+      operationType: "rename",
+      // Will be updated from result
+      previewId: "",
+      operations: [],
+      successCount: 0,
+      failureCount: 0,
+      prompt: request.prompt,
+      requiredApproval: false
+    };
+    this.activeJob = job;
+    this.emit(
+      createEvent(EventTypes.FILE_OP_STARTED, { job })
+    );
+    try {
+      const result = await openCodeService.runTask({
+        prompt,
+        cwd: request.targetDir,
+        autoApprove: true
+      });
+      let operations = [];
+      let summary = "";
+      if (result.output) {
+        const jsonMatch = result.output.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || result.output.match(/(\{[\s\S]*"operations"[\s\S]*\})/);
+        if (jsonMatch) {
+          try {
+            const parsed = JSON.parse(jsonMatch[1]);
+            if (parsed.operations && Array.isArray(parsed.operations)) {
+              operations = parsed.operations.map((op) => ({
+                type: op.type,
+                source: op.source,
+                destination: op.destination,
+                destructive: Boolean(op.destructive)
+              }));
+              summary = parsed.summary || `${operations.length} file operations executed`;
+              for (const op of parsed.operations) {
+                if (op.success !== false) {
+                  job.successCount++;
+                } else {
+                  job.failureCount++;
+                }
+              }
+            }
+          } catch (parseError) {
+            console.error("[FileOperationService] Failed to parse JSON from OpenCode:", parseError);
+          }
+        }
+      }
+      job.operations = operations;
+      job.operationType = this.determineOperationType(operations);
+      job.status = "completed";
+      job.updatedAt = Date.now();
+      this.addToHistory(job);
+      this.emit(
+        createEvent(EventTypes.FILE_OP_COMPLETED, { job })
+      );
+      console.log(`[FileOperationService] Direct execution completed: ${job.successCount} success, ${job.failureCount} failed`);
+      this.activeJob = null;
+      return { job };
+    } catch (error) {
+      job.status = "failed";
+      job.error = { code: "FILE_OP_FAILED", message: error.message };
+      job.updatedAt = Date.now();
+      this.emit(
+        createEvent(EventTypes.FILE_OP_FAILED, {
+          jobId: job.id,
+          error: error.message
+        })
+      );
+      console.error(`[FileOperationService] Direct execution failed:`, error);
+      this.activeJob = null;
+      throw error;
     }
   }
   /**
@@ -4564,18 +4771,52 @@ class FileOperationService extends events.EventEmitter {
     );
     console.log(`[FileOperationService] Executing job ${job.id} with ${preview.operations.length} operations`);
     try {
-      const openCodeService = getOpenCodeService();
-      const executePrompt = FILE_OP_PROMPTS.execute(JSON.stringify(preview.operations, null, 2));
-      await openCodeService.runTask({ prompt: executePrompt });
-      job.status = "completed";
-      job.successCount = preview.operations.length;
+      const fs2 = await import("fs/promises");
+      const path2 = await import("path");
+      for (const op of preview.operations) {
+        try {
+          switch (op.type) {
+            case "rename":
+            case "move":
+              if (op.destination) {
+                const destDir = path2.dirname(op.destination);
+                await fs2.mkdir(destDir, { recursive: true });
+                await fs2.rename(op.source, op.destination);
+                console.log(`[FileOperationService] Renamed: ${op.source} -> ${op.destination}`);
+                job.successCount++;
+              }
+              break;
+            case "copy":
+              if (op.destination) {
+                const destDir = path2.dirname(op.destination);
+                await fs2.mkdir(destDir, { recursive: true });
+                await fs2.copyFile(op.source, op.destination);
+                console.log(`[FileOperationService] Copied: ${op.source} -> ${op.destination}`);
+                job.successCount++;
+              }
+              break;
+            case "delete":
+              await fs2.unlink(op.source);
+              console.log(`[FileOperationService] Deleted: ${op.source}`);
+              job.successCount++;
+              break;
+            default:
+              console.warn(`[FileOperationService] Unknown operation type: ${op.type}`);
+              job.failureCount++;
+          }
+        } catch (opError) {
+          console.error(`[FileOperationService] Operation failed:`, opError);
+          job.failureCount++;
+        }
+      }
+      job.status = job.failureCount === 0 ? "completed" : "completed";
       job.updatedAt = Date.now();
       this.addToHistory(job);
       this.previews.delete(request.previewId);
       this.emit(
         createEvent(EventTypes.FILE_OP_COMPLETED, { job })
       );
-      console.log(`[FileOperationService] Job ${job.id} completed`);
+      console.log(`[FileOperationService] Job ${job.id} completed: ${job.successCount} success, ${job.failureCount} failed`);
       this.activeJob = null;
       return { job };
     } catch (error) {
@@ -5146,12 +5387,13 @@ class DocumentExtractorService {
     return filePath;
   }
   /**
-   * Extract text from a PDF file
+   * Extract text from a PDF file using pdf-parse v2
    */
   async extractFromPdf(filePath) {
     const dataBuffer = fs__namespace.readFileSync(filePath);
-    const data = await pdfParse(dataBuffer);
-    return data.text;
+    const parser = new pdfParse.PDFParse({ data: dataBuffer });
+    const result = await parser.getText();
+    return result.text;
   }
   /**
    * Extract text from a Word document (.docx)
@@ -6406,23 +6648,40 @@ User request: ${userPrompt}`;
    */
   async handleFileIntent(classification) {
     const { intent } = classification;
-    console.log(`[IntentService] Generating file operation preview for: "${classification.rawTranscript}"`);
+    console.log(`[IntentService] Executing file operation: "${classification.rawTranscript}"`);
     try {
-      const result = await fileOperationService.generatePreview({
-        prompt: classification.rawTranscript
+      const copiedFilePaths = clipboardService.readFilePaths();
+      let prompt = classification.rawTranscript;
+      if (copiedFilePaths.length > 0) {
+        console.log(`[IntentService] Found ${copiedFilePaths.length} files in clipboard for file operation`);
+        const fileList = copiedFilePaths.map((p) => `  - ${p}`).join("\n");
+        prompt = `${classification.rawTranscript}
+
+## Files to operate on (from clipboard):
+${fileList}`;
+      }
+      const result = await fileOperationService.executeDirectly({
+        prompt
       });
-      console.log(`[IntentService] File operation preview generated: ${result.preview.id}`);
+      console.log(`[IntentService] File operations executed: ${result.job.successCount} success, ${result.job.failureCount} failed`);
       this.updateLastAction(
         classification.rawTranscript,
         intent,
         true,
-        result.preview.id
+        result.job.id
+      );
+      storeService.addOperation(
+        classification.rawTranscript,
+        "file-operation",
+        true,
+        `Completed ${result.job.successCount} file operations`,
+        result.job.id
       );
       return {
         intent,
         classification,
         handled: true,
-        jobId: result.preview.id
+        jobId: result.job.id
       };
     } catch (error) {
       const errorMsg = error.message;
@@ -6798,7 +7057,7 @@ class GroqSttService {
   }
 }
 const groqSttService = new GroqSttService();
-const SILENCE_TIMEOUT_MS = 1300;
+const SILENCE_TIMEOUT_MS = 1100;
 class ElevenLabsSttService {
   ws = null;
   apiKey = null;
@@ -6933,14 +7192,20 @@ class ElevenLabsSttService {
             if (textChanged) {
               console.log("[ElevenLabs-STT] Live:", fullText);
               this.lastTranscriptText = fullText;
+              if (this.hasExecuted && this.lastExecutedTranscript) {
+                if (!fullText.startsWith(this.lastExecutedTranscript) && !this.lastExecutedTranscript.startsWith(fullText)) {
+                  console.log("[ElevenLabs-STT] New command detected, enabling execution");
+                  this.hasExecuted = false;
+                }
+              }
               this.resetSilenceTimer();
               this.startSilenceTimer();
+              this.transcriptCallback?.({
+                text: fullText,
+                isFinal: false,
+                isPartial: true
+              });
             }
-            this.transcriptCallback?.({
-              text: fullText,
-              isFinal: false,
-              isPartial: true
-            });
           }
           break;
         case "final_transcript":
@@ -6990,7 +7255,7 @@ class ElevenLabsSttService {
    */
   startSilenceTimer() {
     this.resetSilenceTimer();
-    this.silenceTimeout = setTimeout(() => {
+    this.silenceTimeout = setTimeout(async () => {
       if (this.isListening && !this.hasExecuted) {
         const transcript = this.getFullTranscript();
         if (transcript && transcript.length > 15) {
@@ -7008,7 +7273,11 @@ class ElevenLabsSttService {
           console.log(`[ElevenLabs-STT] Silence timeout (${SILENCE_TIMEOUT_MS}ms), auto-executing!`);
           this.hasExecuted = true;
           this.lastExecutedTranscript = transcript;
-          this.executeCallback?.(transcript, "silence");
+          try {
+            await this.executeCallback?.(transcript, "silence");
+          } catch (error) {
+            console.error("[ElevenLabs-STT] Execute callback error:", error);
+          }
         } else if (transcript) {
           console.log(`[ElevenLabs-STT] Transcript too short to execute: "${transcript}" (${transcript.length} chars)`);
         }
@@ -7067,12 +7336,12 @@ class ElevenLabsSttService {
     return committed;
   }
   /**
-   * Clear transcripts and reset state
+   * Clear transcripts and reset state (but keep execution guards)
+   * This is called after each command execution to prepare for the next one
    */
   clearTranscripts() {
     this.currentTranscript = "";
     this.committedTranscripts = [];
-    this.hasExecuted = false;
     this.lastTranscriptText = "";
     this.resetSilenceTimer();
   }
@@ -7285,6 +7554,10 @@ class VoiceService {
   // Transcript history (in-memory, persisted to SQLite)
   transcripts = [];
   lastTranscript = null;
+  // Flag to suppress partial transcripts during command execution
+  isExecutingCommand = false;
+  // Track when we last showed "Done" to prevent immediate overwrites
+  doneShownAt = 0;
   /**
    * Set the event emitter for sending events to the renderer
    */
@@ -7303,6 +7576,8 @@ class VoiceService {
   emit(event) {
     if (this.eventEmitter) {
       this.eventEmitter(event);
+    } else {
+      console.warn("[VoiceService] eventEmitter not set, event dropped:", event.type);
     }
   }
   /**
@@ -7529,8 +7804,28 @@ class VoiceService {
    * Set up ElevenLabs streaming with live transcript updates and auto-execute
    */
   async setupElevenLabsStreaming() {
+    let lastExecutedText = "";
     elevenLabsSttService.onTranscript((result) => {
       this.captureState.pendingTranscript = result.text;
+      if (this.isExecutingCommand && !result.isFinal) {
+        const isNewSpeech = lastExecutedText && !result.text.startsWith(lastExecutedText) && !lastExecutedText.startsWith(result.text);
+        if (isNewSpeech) {
+          console.log(`[VoiceService] New speech detected during execution hold, allowing: "${result.text.slice(0, 30)}..."`);
+          this.isExecutingCommand = false;
+          this.doneShownAt = 0;
+          lastExecutedText = "";
+        } else {
+          return;
+        }
+      }
+      const timeSinceDone = Date.now() - this.doneShownAt;
+      if (this.doneShownAt > 0 && timeSinceDone < 2e3 && !result.isFinal) {
+        return;
+      }
+      if (this.doneShownAt > 0 && timeSinceDone >= 2e3) {
+        this.doneShownAt = 0;
+        lastExecutedText = "";
+      }
       console.log(`[VoiceService] ElevenLabs transcript: "${result.text}" (final: ${result.isFinal})`);
       this.emit(
         createEvent(EventTypes.VOICE_TRANSCRIPT, {
@@ -7541,7 +7836,10 @@ class VoiceService {
     });
     elevenLabsSttService.onExecute(async (transcript, reason) => {
       console.log(`[VoiceService] Auto-execute triggered by ${reason}: "${transcript}"`);
+      this.isExecutingCommand = true;
+      lastExecutedText = transcript;
       this.setAppStatus("processing");
+      console.log(`[VoiceService] === EXECUTING: "${transcript.slice(0, 50)}..." ===`);
       this.emit(
         createEvent(EventTypes.VOICE_TRANSCRIPT, {
           text: transcript,
@@ -7555,6 +7853,8 @@ class VoiceService {
       this.storeTranscript(transcript, startTime, duration);
       const routingResult = await intentService.routeTranscript(transcript);
       console.log(`[VoiceService] Auto-execute intent result:`, routingResult);
+      console.log(`[VoiceService] === DONE! Emitting isDone=true - USER CAN PASTE NOW ===`);
+      this.doneShownAt = Date.now();
       this.emit(
         createEvent(EventTypes.VOICE_TRANSCRIPT, {
           text: "✓ Done! Ready for next command...",
@@ -7565,15 +7865,8 @@ class VoiceService {
       );
       elevenLabsSttService.clearTranscripts();
       setTimeout(() => {
-        if (this.captureState.isCapturing) {
-          this.setAppStatus("listening");
-          this.emit(
-            createEvent(EventTypes.VOICE_TRANSCRIPT, {
-              text: "",
-              isFinal: false
-            })
-          );
-        }
+        console.log(`[VoiceService] 1.5s timeout - resetting isExecutingCommand to false, keeping done state`);
+        this.isExecutingCommand = false;
       }, 1500);
     });
     const noiseSuppression = await storeService.getSetting("voice.noiseSuppression");
@@ -7595,6 +7888,8 @@ class VoiceService {
       this.captureState.recording.stop();
     }
     this.captureState.isCapturing = false;
+    this.isExecutingCommand = false;
+    this.doneShownAt = 0;
     this.emit(createEvent(EventTypes.VOICE_STOPPED));
     console.log(`[VoiceService] Audio capture stopped (duration: ${duration}ms)`);
     if (duration < 300) {
@@ -7797,33 +8092,41 @@ class VoiceService {
   async listInputDevices() {
     return new Promise((resolve) => {
       const { exec } = require("child_process");
-      exec("system_profiler SPAudioDataType -json", (error, stdout) => {
+      exec("system_profiler SPAudioDataType", (error, stdout) => {
         if (error) {
-          console.error("[VoiceService] Failed to list audio devices:", error);
+          console.error("[VoiceService] Failed to run system_profiler:", error.message);
           resolve([]);
           return;
         }
-        try {
-          const data = JSON.parse(stdout);
-          const devices = [];
-          const audioData = data.SPAudioDataType || [];
-          for (const item of audioData) {
-            if (item._items) {
-              for (const device of item._items) {
-                if (device.coreaudio_input_source) {
-                  devices.push(device._name);
-                }
-              }
+        const devices = [];
+        const lines = stdout.split("\n");
+        let currentDevice = "";
+        let hasInput = false;
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
+          const deviceMatch = line.match(/^\s{4,12}([^:]+):$/);
+          if (deviceMatch && !line.includes("Audio:") && !line.includes("Devices:")) {
+            if (currentDevice && hasInput) {
+              devices.push({ id: currentDevice, name: currentDevice });
             }
-            if (item.coreaudio_input_source) {
-              devices.push(item._name);
+            currentDevice = deviceMatch[1].trim();
+            hasInput = false;
+          }
+          if (currentDevice && line.includes("Input Channels:")) {
+            const channelMatch = line.match(/Input Channels:\s*(\d+)/);
+            if (channelMatch && parseInt(channelMatch[1]) > 0) {
+              hasInput = true;
             }
           }
-          resolve(devices);
-        } catch (parseError) {
-          console.error("[VoiceService] Failed to parse audio devices:", parseError);
-          resolve([]);
         }
+        if (currentDevice && hasInput) {
+          devices.push({ id: currentDevice, name: currentDevice });
+        }
+        const uniqueDevices = devices.filter(
+          (device, index, self) => index === self.findIndex((d) => d.id === device.id)
+        );
+        console.log("[VoiceService] Found audio input devices:", uniqueDevices);
+        resolve(uniqueDevices);
       });
     });
   }
@@ -8983,6 +9286,10 @@ let tray = null;
 exports.appStatus = "idle";
 function emitEvent(event) {
   if (mainWindow && !mainWindow.isDestroyed()) {
+    if (event.type === "VOICE_TRANSCRIPT") {
+      const payload = event.payload;
+      console.log(`[Main] Emitting VOICE_TRANSCRIPT: isExecuting=${payload?.isExecuting}, isDone=${payload?.isDone}, text="${payload?.text?.slice(0, 30)}..."`);
+    }
     mainWindow.webContents.send(IpcChannels.EVENTS, event);
   }
 }

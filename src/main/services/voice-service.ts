@@ -130,6 +130,11 @@ class VoiceService {
   // Transcript history (in-memory, persisted to SQLite)
   private transcripts: TranscriptRecord[] = []
   private lastTranscript: TranscriptRecord | null = null
+  
+  // Flag to suppress partial transcripts during command execution
+  private isExecutingCommand: boolean = false
+  // Track when we last showed "Done" to prevent immediate overwrites
+  private doneShownAt: number = 0
 
   /**
    * Set the event emitter for sending events to the renderer
@@ -151,6 +156,8 @@ class VoiceService {
   private emit<T>(event: ClipMorphEvent<T>): void {
     if (this.eventEmitter) {
       this.eventEmitter(event)
+    } else {
+      console.warn('[VoiceService] eventEmitter not set, event dropped:', event.type)
     }
   }
 
@@ -440,9 +447,46 @@ class VoiceService {
    * Set up ElevenLabs streaming with live transcript updates and auto-execute
    */
   private async setupElevenLabsStreaming(): Promise<void> {
+    // Track last executed command to detect new speech
+    let lastExecutedText = ''
+    
     // Set up transcript callback for live updates
     elevenLabsSttService.onTranscript((result) => {
       this.captureState.pendingTranscript = result.text
+      
+      // Don't emit partial transcripts while executing - they would overwrite the execution status
+      if (this.isExecutingCommand && !result.isFinal) {
+        // Check if this is genuinely new speech (not just repeats of what we executed)
+        const isNewSpeech = lastExecutedText && 
+          !result.text.startsWith(lastExecutedText) && 
+          !lastExecutedText.startsWith(result.text)
+        
+        if (isNewSpeech) {
+          // New command detected, allow it through
+          console.log(`[VoiceService] New speech detected during execution hold, allowing: "${result.text.slice(0, 30)}..."`)
+          this.isExecutingCommand = false
+          this.doneShownAt = 0
+          lastExecutedText = ''
+        } else {
+          // Same text as executed, suppress
+          return
+        }
+      }
+      
+      // Don't let partials overwrite the "Done!" message for 2 seconds after done
+      // This prevents ElevenLabs echo from immediately clearing the done state
+      const timeSinceDone = Date.now() - this.doneShownAt
+      if (this.doneShownAt > 0 && timeSinceDone < 2000 && !result.isFinal) {
+        // Suppress ALL partials during the done display period
+        // Only genuinely NEW speech (detected above) breaks through
+        return
+      }
+      
+      // Reset doneShownAt if we're past the 2s window and showing new content
+      if (this.doneShownAt > 0 && timeSinceDone >= 2000) {
+        this.doneShownAt = 0
+        lastExecutedText = ''
+      }
       
       console.log(`[VoiceService] ElevenLabs transcript: "${result.text}" (final: ${result.isFinal})`)
       
@@ -460,10 +504,15 @@ class VoiceService {
     elevenLabsSttService.onExecute(async (transcript, reason) => {
       console.log(`[VoiceService] Auto-execute triggered by ${reason}: "${transcript}"`)
       
+      // Suppress partial transcript emissions during execution
+      this.isExecutingCommand = true
+      lastExecutedText = transcript
+      
       // Show processing status but DON'T stop recording
       this.setAppStatus('processing')
       
       // Emit transcript showing what's being executed
+      console.log(`[VoiceService] === EXECUTING: "${transcript.slice(0, 50)}..." ===`)
       this.emit(
         createEvent<VoiceTranscriptPayload>(EventTypes.VOICE_TRANSCRIPT, {
           text: transcript,
@@ -481,6 +530,8 @@ class VoiceService {
       console.log(`[VoiceService] Auto-execute intent result:`, routingResult)
       
       // Show "Done!" briefly before going back to listening
+      console.log(`[VoiceService] === DONE! Emitting isDone=true - USER CAN PASTE NOW ===`)
+      this.doneShownAt = Date.now() // Track when done was shown
       this.emit(
         createEvent<VoiceTranscriptPayload>(EventTypes.VOICE_TRANSCRIPT, {
           text: '✓ Done! Ready for next command...',
@@ -492,17 +543,14 @@ class VoiceService {
       // Clear transcripts for next command
       elevenLabsSttService.clearTranscripts()
       
-      // After a brief delay, go back to listening state
+      // After a brief delay, allow new speech but DON'T change status yet
+      // The status will naturally update when user speaks again or stops recording
       setTimeout(() => {
-        if (this.captureState.isCapturing) {
-          this.setAppStatus('listening')
-          this.emit(
-            createEvent<VoiceTranscriptPayload>(EventTypes.VOICE_TRANSCRIPT, {
-              text: '',
-              isFinal: false,
-            })
-          )
-        }
+        console.log(`[VoiceService] 1.5s timeout - resetting isExecutingCommand to false, keeping done state`)
+        this.isExecutingCommand = false // Re-enable partial transcript emissions
+        // Note: doneShownAt stays set for 2s total to suppress echoes
+        // DON'T call setAppStatus('listening') - that would overwrite the Done! state
+        // The UI will update when genuinely new speech comes in
       }, 1500) // Show "Done!" for 1.5 seconds
     })
 
@@ -536,6 +584,8 @@ class VoiceService {
 
     // Mark as no longer capturing
     this.captureState.isCapturing = false
+    this.isExecutingCommand = false // Reset execution flag
+    this.doneShownAt = 0 // Reset done timestamp
 
     // Emit voice stopped event
     this.emit(createEvent(EventTypes.VOICE_STOPPED))
@@ -801,44 +851,60 @@ class VoiceService {
    * List available audio input devices (macOS)
    * Returns device names that can be passed to setInputDevice()
    */
-  async listInputDevices(): Promise<string[]> {
+  async listInputDevices(): Promise<{ id: string; name: string }[]> {
     return new Promise((resolve) => {
       const { exec } = require('child_process')
       
-      // Use system_profiler to get audio devices on macOS
-      exec('system_profiler SPAudioDataType -json', (error: Error | null, stdout: string) => {
+      // Use system_profiler to get audio devices
+      // Format: "Device Name:" at 8-space indent, then "Input Channels: N"
+      exec('system_profiler SPAudioDataType', (error: Error | null, stdout: string) => {
         if (error) {
-          console.error('[VoiceService] Failed to list audio devices:', error)
+          console.error('[VoiceService] Failed to run system_profiler:', error.message)
           resolve([])
           return
         }
         
-        try {
-          const data = JSON.parse(stdout)
-          const devices: string[] = []
+        const devices: { id: string; name: string }[] = []
+        const lines = stdout.split('\n')
+        let currentDevice = ''
+        let hasInput = false
+        
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i]
           
-          // Extract input device names
-          const audioData = data.SPAudioDataType || []
-          for (const item of audioData) {
-            // Look for input devices
-            if (item._items) {
-              for (const device of item._items) {
-                if (device.coreaudio_input_source) {
-                  devices.push(device._name)
-                }
-              }
+          // Device names appear at specific indentation (usually 8 spaces)
+          // and end with a colon
+          const deviceMatch = line.match(/^\s{4,12}([^:]+):$/)
+          if (deviceMatch && !line.includes('Audio:') && !line.includes('Devices:')) {
+            // If we had a device being tracked with input, save it
+            if (currentDevice && hasInput) {
+              devices.push({ id: currentDevice, name: currentDevice })
             }
-            // Direct device entries
-            if (item.coreaudio_input_source) {
-              devices.push(item._name)
-            }
+            currentDevice = deviceMatch[1].trim()
+            hasInput = false
           }
           
-          resolve(devices)
-        } catch (parseError) {
-          console.error('[VoiceService] Failed to parse audio devices:', parseError)
-          resolve([])
+          // Check for input channels
+          if (currentDevice && line.includes('Input Channels:')) {
+            const channelMatch = line.match(/Input Channels:\s*(\d+)/)
+            if (channelMatch && parseInt(channelMatch[1]) > 0) {
+              hasInput = true
+            }
+          }
         }
+        
+        // Don't forget the last device
+        if (currentDevice && hasInput) {
+          devices.push({ id: currentDevice, name: currentDevice })
+        }
+        
+        // Remove duplicates
+        const uniqueDevices = devices.filter((device, index, self) =>
+          index === self.findIndex(d => d.id === device.id)
+        )
+        
+        console.log('[VoiceService] Found audio input devices:', uniqueDevices)
+        resolve(uniqueDevices)
       })
     })
   }

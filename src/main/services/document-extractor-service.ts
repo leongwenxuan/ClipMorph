@@ -7,8 +7,7 @@
 
 import * as fs from 'fs'
 import * as path from 'path'
-// @ts-expect-error - pdf-parse doesn't have types
-import pdfParse from 'pdf-parse'
+import { PDFParse } from 'pdf-parse'
 import mammoth from 'mammoth'
 
 export interface DocumentExtractionResult {
@@ -85,12 +84,13 @@ class DocumentExtractorService {
   }
 
   /**
-   * Extract text from a PDF file
+   * Extract text from a PDF file using pdf-parse v2
    */
   private async extractFromPdf(filePath: string): Promise<string> {
     const dataBuffer = fs.readFileSync(filePath)
-    const data = await pdfParse(dataBuffer)
-    return data.text
+    const parser = new PDFParse({ data: dataBuffer })
+    const result = await parser.getText()
+    return result.text
   }
 
   /**

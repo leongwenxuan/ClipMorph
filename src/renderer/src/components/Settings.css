@@ -505,3 +505,52 @@
 .resume-path-input::placeholder {
   color: var(--text-tertiary, #666);
 }
+
+/* Audio device selector */
+.select-with-refresh {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.select-with-refresh select {
+  flex: 1;
+  min-width: 180px;
+  padding: 6px 10px;
+  font-size: 12px;
+  background: var(--bg-secondary, #252545);
+  border: 1px solid var(--border-color, #2a2a4a);
+  border-radius: 4px;
+  color: var(--text-primary, #fff);
+  cursor: pointer;
+  outline: none;
+}
+
+.select-with-refresh select:hover {
+  border-color: var(--border-hover, #3a3a5a);
+}
+
+.select-with-refresh select:focus {
+  border-color: var(--accent-color, #3b82f6);
+}
+
+.refresh-devices-btn {
+  padding: 6px 10px;
+  font-size: 14px;
+  background: var(--bg-secondary, #252545);
+  border: 1px solid var(--border-color, #2a2a4a);
+  border-radius: 4px;
+  color: var(--text-secondary, #888);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.refresh-devices-btn:hover:not(:disabled) {
+  background: var(--bg-tertiary, #353555);
+  color: var(--text-primary, #fff);
+}
+
+.refresh-devices-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
