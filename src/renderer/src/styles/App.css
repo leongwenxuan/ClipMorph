@@ -1,0 +1,577 @@
+/* ============================================================================
+   ClipMorph App Styles - Notch Bar Design
+   ============================================================================ */
+
+/* Base app container */
+.app {
+  width: 100%;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: rgba(28, 28, 32, 0.92);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', sans-serif;
+}
+
+/* ============================================================================
+   COMPACT MODE - Thin notch bar
+   ============================================================================ */
+
+.app.compact {
+  border-radius: 0 0 16px 16px; /* Only bottom corners - attached to top */
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-top: none;
+  box-shadow: 
+    0 8px 32px rgba(0, 0, 0, 0.5),
+    0 2px 8px rgba(0, 0, 0, 0.3);
+  background: rgba(22, 22, 26, 0.92);
+  backdrop-filter: blur(50px);
+  -webkit-backdrop-filter: blur(50px);
+}
+
+.app.compact.recording {
+  border-color: rgba(239, 68, 68, 0.4);
+  box-shadow: 
+    0 8px 32px rgba(239, 68, 68, 0.25),
+    0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.compact-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 14px;
+  height: 100%;
+  gap: 10px;
+  -webkit-app-region: drag;
+}
+
+.compact-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  transition: all 0.2s ease;
+}
+
+.status-dot.recording {
+  animation: recordingPulse 1s ease-in-out infinite;
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.6);
+}
+
+.compact-status-text {
+  font-size: 12px;
+  font-weight: 500;
+  color: #e0e0e0;
+  letter-spacing: 0.3px;
+}
+
+.compact-transcript {
+  flex: 1;
+  font-size: 12px;
+  color: #93c5fd;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+}
+
+.compact-waveform {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  height: 20px;
+}
+
+.compact-waveform .wave-bar {
+  width: 3px;
+  height: 8px;
+  background: #ef4444;
+  border-radius: 2px;
+  animation: waveAnimation 0.6s ease-in-out infinite;
+}
+
+.compact-waveform .wave-bar:nth-child(1) { animation-delay: 0s; }
+.compact-waveform .wave-bar:nth-child(2) { animation-delay: 0.1s; }
+.compact-waveform .wave-bar:nth-child(3) { animation-delay: 0.2s; }
+
+.compact-actions {
+  display: flex;
+  gap: 4px;
+  -webkit-app-region: no-drag;
+}
+
+.compact-btn {
+  background: rgba(255, 255, 255, 0.1);
+  border: none;
+  font-size: 10px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  color: #b0b0b0;
+  transition: all 0.15s ease;
+  -webkit-app-region: no-drag;
+}
+
+.compact-btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
+}
+
+/* ============================================================================
+   COMPACT TEXT INPUT MODE
+   ============================================================================ */
+
+.app.compact.text-input-mode {
+  border-color: rgba(59, 130, 246, 0.4);
+  box-shadow: 
+    0 8px 32px rgba(59, 130, 246, 0.2),
+    0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.compact-text-input-bar {
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  height: 100%;
+  width: 100%;
+  gap: 6px;
+}
+
+.text-command-input {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: #e0e0e0;
+  outline: none;
+  transition: all 0.15s ease;
+  -webkit-app-region: no-drag;
+}
+
+.text-command-input::placeholder {
+  color: #6b7280;
+  font-size: 11px;
+}
+
+.text-command-input:focus {
+  border-color: rgba(59, 130, 246, 0.5);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.text-command-input:disabled {
+  opacity: 0.6;
+}
+
+.text-input-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  -webkit-app-region: no-drag;
+}
+
+.keyboard-btn {
+  font-size: 12px !important;
+}
+
+/* ============================================================================
+   COMPACT RECORDING BAR - VoiceInk Style
+   ============================================================================ */
+
+.compact-recording-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  height: 100%;
+  width: 100%;
+}
+
+.recording-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+}
+
+.recording-dot-small {
+  width: 8px;
+  height: 8px;
+  background: #ef4444;
+  border-radius: 50%;
+  animation: recordingPulse 1s ease-in-out infinite;
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.6);
+  flex-shrink: 0;
+}
+
+.compact-waveform-large {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 24px;
+}
+
+.compact-waveform-large .wave-bar {
+  width: 3px;
+  height: 10px;
+  background: linear-gradient(to top, #ef4444, #f87171);
+  border-radius: 1.5px;
+  animation: waveAnimationSmall 0.7s ease-in-out infinite;
+}
+
+.compact-waveform-large .wave-bar:nth-child(1) { animation-delay: 0s; }
+.compact-waveform-large .wave-bar:nth-child(2) { animation-delay: 0.08s; }
+.compact-waveform-large .wave-bar:nth-child(3) { animation-delay: 0.16s; }
+.compact-waveform-large .wave-bar:nth-child(4) { animation-delay: 0.24s; }
+.compact-waveform-large .wave-bar:nth-child(5) { animation-delay: 0.32s; }
+.compact-waveform-large .wave-bar:nth-child(6) { animation-delay: 0.40s; }
+.compact-waveform-large .wave-bar:nth-child(7) { animation-delay: 0.48s; }
+
+@keyframes waveAnimationSmall {
+  0%, 100% { height: 6px; }
+  50% { height: 20px; }
+}
+
+.recording-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  -webkit-app-region: no-drag;
+}
+
+.recording-action-btn {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: none;
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+  -webkit-app-region: no-drag;
+}
+
+.recording-action-btn.cancel {
+  background: rgba(255, 255, 255, 0.1);
+  color: #a0a0a0;
+}
+
+.recording-action-btn.cancel:hover {
+  background: rgba(239, 68, 68, 0.3);
+  color: #fca5a5;
+}
+
+.recording-action-btn.done {
+  background: rgba(34, 197, 94, 0.8);
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(34, 197, 94, 0.4);
+}
+
+.recording-action-btn.done:hover {
+  background: rgba(34, 197, 94, 1);
+  transform: scale(1.05);
+}
+
+/* ============================================================================
+   EXPANDED MODE - Full panel
+   ============================================================================ */
+
+.app.expanded {
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 
+    0 25px 50px -12px rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(255, 255, 255, 0.05) inset;
+}
+
+.app.expanded.recording {
+  border-color: rgba(239, 68, 68, 0.5);
+  box-shadow: 
+    0 25px 50px -12px rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(239, 68, 68, 0.3) inset,
+    0 0 30px rgba(239, 68, 68, 0.15);
+}
+
+.app-header {
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  -webkit-app-region: drag;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.collapse-btn {
+  font-size: 9px;
+  padding: 4px 8px;
+  margin-left: 4px;
+}
+
+.app-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #f0f0f0;
+  letter-spacing: 0.3px;
+  margin: 0;
+}
+
+.header-actions {
+  display: flex;
+  gap: 4px;
+  -webkit-app-region: no-drag;
+}
+
+.header-btn {
+  background: transparent;
+  border: none;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 4px;
+  transition: all 0.15s ease;
+  opacity: 0.7;
+  -webkit-app-region: no-drag;
+}
+
+.header-btn:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.app-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 32px;
+  gap: 16px;
+  -webkit-app-region: no-drag;
+}
+
+.status-container {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 20px 32px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.status-indicator {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.status-text {
+  font-size: 15px;
+  font-weight: 500;
+  color: #c0c0c0;
+  text-transform: capitalize;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.7;
+    transform: scale(0.95);
+  }
+}
+
+/* Permission warning */
+.permission-warning {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: rgba(239, 68, 68, 0.15);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 6px;
+  font-size: 12px;
+  color: #fca5a5;
+}
+
+.warning-icon {
+  font-size: 14px;
+}
+
+.warning-text {
+  flex: 1;
+}
+
+.permission-btn {
+  padding: 4px 10px;
+  background: rgba(59, 130, 246, 0.8);
+  border: none;
+  border-radius: 4px;
+  color: white;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s;
+  -webkit-app-region: no-drag;
+}
+
+.permission-btn:hover {
+  background: rgba(59, 130, 246, 1);
+}
+
+/* Permission status badge */
+.permission-status {
+  display: flex;
+  gap: 8px;
+}
+
+.permission-badge {
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  -webkit-app-region: no-drag;
+}
+
+.permission-badge.granted {
+  background: rgba(34, 197, 94, 0.2);
+  color: #86efac;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+.permission-badge.denied {
+  background: rgba(239, 68, 68, 0.2);
+  color: #fca5a5;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+/* Live transcript display */
+.live-transcript {
+  padding: 14px 20px;
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  border-radius: 10px;
+  font-size: 14px;
+  color: #93c5fd;
+  text-align: center;
+  max-width: 340px;
+  word-wrap: break-word;
+  animation: fadeIn 0.2s ease;
+  -webkit-app-region: no-drag;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Recording overlay */
+.recording-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 24px;
+  background: rgba(20, 20, 24, 0.95);
+  backdrop-filter: blur(10px);
+  z-index: 100;
+  border-radius: 16px;
+  animation: fadeIn 0.2s ease;
+}
+
+.recording-indicator {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.recording-dot {
+  width: 16px;
+  height: 16px;
+  background: #ef4444;
+  border-radius: 50%;
+  animation: recordingPulse 1s ease-in-out infinite;
+  box-shadow: 0 0 20px rgba(239, 68, 68, 0.6);
+}
+
+.recording-text {
+  font-size: 28px;
+  font-weight: 600;
+  color: #fff;
+  letter-spacing: 1px;
+}
+
+.recording-waveform {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 40px;
+}
+
+.wave-bar {
+  width: 6px;
+  height: 20px;
+  background: linear-gradient(to top, #ef4444, #f87171);
+  border-radius: 3px;
+  animation: waveAnimation 0.8s ease-in-out infinite;
+}
+
+.wave-bar:nth-child(1) { animation-delay: 0s; }
+.wave-bar:nth-child(2) { animation-delay: 0.1s; }
+.wave-bar:nth-child(3) { animation-delay: 0.2s; }
+.wave-bar:nth-child(4) { animation-delay: 0.3s; }
+.wave-bar:nth-child(5) { animation-delay: 0.4s; }
+
+@keyframes recordingPulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.6;
+    transform: scale(0.9);
+  }
+}
+
+@keyframes waveAnimation {
+  0%, 100% {
+    height: 12px;
+  }
+  50% {
+    height: 36px;
+  }
+}

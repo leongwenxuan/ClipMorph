@@ -1,0 +1,86 @@
+# generated: 2026-01-17T07:04:12.520565Z
+# project: ClipMorph
+# project_key: clipmorph
+# tracking_system: file-system
+# story_location: /Users/leongwenxuan/Desktop/ClipMorph/_bmad-output/implementation-artifacts
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Epic Status Transitions:
+#   - backlog → in-progress: Automatically when first story is created (via create-story)
+#   - in-progress → done: Manually when all stories reach 'done' status
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created in stories folder
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review (via Dev's code-review workflow)
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+#
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when first story is created
+# - Stories can be worked in parallel if team capacity allows
+# - SM typically creates next story after previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+
+generated: 2026-01-17T07:04:12.520565Z
+project: ClipMorph
+project_key: clipmorph
+tracking_system: file-system
+story_location: /Users/leongwenxuan/Desktop/ClipMorph/_bmad-output/implementation-artifacts
+
+development_status:
+  epic-1: in-progress
+  1-1-set-up-initial-project-from-starter-template-electron-vite: review
+  1-2-core-ipc-contract-events-bus: review
+  1-3-permission-detection-degraded-mode: review
+  1-4-job-manager-status-model-transforms: review
+  1-5-clipboard-watcher-snapshot-gating: review
+  1-6-shadow-clipboard-undo-hotkey-z: review
+  1-7-global-push-to-talk-hotkey: review
+  1-8-local-stt-sidecar-parakeet-v2-transcript-surfacing: review
+  1-9-intent-router-supported-command-set-cancel: review
+  1-10-transform-capability-url-clean: review
+  1-11-transform-capability-url-markdown-link: review
+  1-12-transform-capability-json-pretty-minify: review
+  1-13-transform-capability-json-yaml-conversion: review
+  1-14-transform-capability-extract-emails-extract-links: review
+  1-15-transform-capability-redact-secrets-heuristics: review
+  1-16-multi-step-transform-chaining: review
+  1-17-lightweight-result-feedback-last-action-summary: review
+  epic-1-retrospective: optional
+
+  epic-2: in-progress
+  2-1-settings-storage-sqlite-basic-settings-ui: review
+  2-2-configure-push-to-talk-behavior: review
+  2-3-transcript-history-last-20-clear-history-control: review
+  2-4-action-failure-diagnostics-non-persistent: review
+  epic-2-retrospective: optional
+
+  epic-3: in-progress
+  3-1-automation-job-lifecycle-status-ui: review
+  3-2-start-apply-on-this-portal-automation-from-voice: review
+  3-3-agentic-automation-loop-agent-browser-with-schema-validation: review
+  3-4-needs-input-interruptions-login-captcha-ambiguity: review
+  3-5-automation-form-fill-basic-resume-mapping: review
+  epic-3-retrospective: optional
+
+  # Post-MVP: OpenCode CLI Integration
+  epic-4: in-progress
+  4-1-opencode-cli-sidecar-integration: review
+  4-2-voice-triggered-code-tasks-via-opencode: review
+  4-3-custom-subagents-configuration: review
+  4-4-multi-stage-agentic-workflows-plan-code-review: review
+  4-5-file-folder-operations-via-voice: review
+  4-6-reusable-skills-library: review
+  epic-4-retrospective: optional

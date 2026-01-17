@@ -1,0 +1,122 @@
+/* LastAction Component Styles */
+
+.last-action {
+  position: fixed;
+  bottom: 12px;
+  left: 12px;
+  right: 12px;
+  background: var(--bg-primary, #1a1a2e);
+  border-radius: 8px;
+  padding: 10px 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--border-color, #2a2a4a);
+  animation: slideUp 0.2s ease-out;
+  z-index: 50;
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.last-action.success {
+  border-left: 3px solid #22c55e;
+}
+
+.last-action.failure {
+  border-left: 3px solid #ef4444;
+}
+
+.last-action-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.last-action-status {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.last-action.success .last-action-status {
+  color: #22c55e;
+}
+
+.last-action.failure .last-action-status {
+  color: #ef4444;
+}
+
+.last-action-capability {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary, #fff);
+  flex: 1;
+}
+
+.last-action-dismiss {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary, #888);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  transition: all 0.15s ease;
+}
+
+.last-action-dismiss:hover {
+  background: var(--hover-bg, rgba(255, 255, 255, 0.1));
+  color: var(--text-primary, #fff);
+}
+
+.last-action-transcript {
+  font-size: 11px;
+  color: var(--text-secondary, #888);
+  font-style: italic;
+  margin-bottom: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.last-action-error {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: 4px;
+  padding: 8px;
+  margin-bottom: 6px;
+}
+
+.error-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: #ef4444;
+  margin-bottom: 4px;
+}
+
+.error-message {
+  font-size: 11px;
+  color: #fca5a5;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.last-action-meta {
+  display: flex;
+  gap: 12px;
+  font-size: 10px;
+  color: var(--text-tertiary, #666);
+}
+
+.last-action-job {
+  font-family: 'SF Mono', 'Monaco', monospace;
+}

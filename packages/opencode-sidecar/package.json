@@ -1,0 +1,18 @@
+{
+  "name": "@clipmorph/opencode-sidecar",
+  "version": "0.1.0",
+  "description": "OpenCode CLI sidecar integration for ClipMorph",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "node-pty": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.8",
+    "typescript": "^5.5.2"
+  }
+}

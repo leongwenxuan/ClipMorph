@@ -1,0 +1,6 @@
+# STT Sidecar Dependencies
+# Parakeet v2 model (nvidia/parakeet-tdt-0.6b-v2)
+nemo_toolkit[asr]>=2.0.0
+torch>=2.0.0
+soundfile>=0.12.0
+numpy>=1.24.0
