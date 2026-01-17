@@ -10,6 +10,7 @@ import {
 } from '../../../packages/contracts/src'
 import Settings from './components/Settings'
 import OperationsHistory from './components/OperationsHistory'
+import OpenCodePermissionModal from './components/OpenCodePermissionModal'
 import LastAction from './components/LastAction'
 import JobStatus from './components/JobStatus'
 import './styles/App.css'
@@ -291,6 +292,8 @@ function App(): JSX.Element {
               </button>
             </div>
           </div>
+          {/* Show modals even in compact mode */}
+          <OpenCodePermissionModal />
         </div>
       )
     }
@@ -330,6 +333,8 @@ function App(): JSX.Element {
               </button>
             </div>
           </div>
+          {/* Show modals even in compact mode */}
+          <OpenCodePermissionModal />
         </div>
       )
     }
@@ -363,6 +368,8 @@ function App(): JSX.Element {
             </button>
           </div>
         </div>
+        {/* Show modals even in compact mode */}
+        <OpenCodePermissionModal />
       </div>
     )
   }
@@ -470,6 +477,9 @@ function App(): JSX.Element {
 
       {showSettings && <Settings onClose={() => setShowSettings(false)} />}
       {showHistory && <OperationsHistory onClose={() => setShowHistory(false)} />}
+
+      {/* OpenCode permission modal - always mounted to listen for events */}
+      <OpenCodePermissionModal />
 
       <LastAction />
       <JobStatus />

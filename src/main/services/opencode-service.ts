@@ -22,6 +22,7 @@ import {
   EventTypes,
   OpenCodeStartedPayload,
   OpenCodeOutputPayload,
+  OpenCodePermissionRequestPayload,
   OpenCodeCompletedPayload,
   OpenCodeFailedPayload,
   OpenCodeCancelledPayload,
@@ -242,22 +243,50 @@ class OpenCodeSidecar extends EventEmitter {
         // This handles interactive prompts, ANSI codes, and terminal sizing
         // Note: node-pty is a native module that may crash if not rebuilt for Electron
         // Run: npx electron-rebuild -f -w node-pty
-        this.ptyProcess = pty.spawn(this.binaryPath, [request.prompt], {
+        
+        // Build args - use "run" subcommand for non-interactive execution
+        // Format: opencode run "prompt message"
+        const args = ['run', request.prompt]
+        
+        // Check if user wants auto-approve mode (dangerous but fully agentic)
+        // TODO: Make this configurable in settings
+        const autoApprove = process.env.OPENCODE_AUTO_APPROVE === 'true'
+        if (autoApprove) {
+          args.push('--yes') // Auto-approve all operations
+        }
+        
+        // Use ClipMorph's app data directory for OpenCode config to avoid ~/.config permission issues
+        const { app } = require('electron')
+        const opencodeConfigDir = require('path').join(app.getPath('userData'), 'opencode-config')
+        
+        console.log('[OpenCode] Starting:', this.binaryPath, args.join(' '))
+        console.log('[OpenCode] Working directory:', request.cwd || process.cwd())
+        
+        this.ptyProcess = pty.spawn(this.binaryPath, args, {
           name: 'xterm-256color',
           cols: 120,
           rows: 30,
           cwd: request.cwd || process.cwd(),
           env: {
             ...process.env,
-            CI: 'true', // Disable interactive prompts
+            // Don't set CI=true - we want interactive mode for permission handling
             NO_COLOR: '1', // Disable ANSI colors for cleaner output
             TERM: 'xterm-256color',
+            // Override OpenCode's config directory to avoid ~/.config permission issues
+            XDG_CONFIG_HOME: opencodeConfigDir,
+            OPENCODE_CONFIG_DIR: opencodeConfigDir,
           } as Record<string, string>,
         })
 
         // Handle PTY data (combined stdout/stderr in PTY)
         this.ptyProcess.onData((data: string) => {
           this.outputBuffer += data
+          
+          // Log OpenCode output for debugging
+          const cleanData = data.replace(/\x1b\[[0-9;]*m/g, '').trim() // Strip ANSI codes
+          if (cleanData) {
+            console.log('[OpenCode]', cleanData)
+          }
 
           const chunk: OutputChunk = {
             type: 'stdout', // PTY combines stdout/stderr
@@ -265,6 +294,18 @@ class OpenCodeSidecar extends EventEmitter {
             timestamp: Date.now(),
           }
           this.emit('output', chunk)
+          
+          // Check for permission/access errors
+          const accessError = this.detectAccessError(data)
+          if (accessError) {
+            this.emit('accessError', accessError)
+          }
+          
+          // Check for permission prompts in the output
+          const permissionRequest = this.detectPermissionPrompt(this.outputBuffer)
+          if (permissionRequest) {
+            this.emit('permissionRequest', permissionRequest)
+          }
         })
 
         // Handle PTY exit
@@ -273,6 +314,8 @@ class OpenCodeSidecar extends EventEmitter {
 
           const durationMs = Date.now() - startTime
           const success = exitCode === 0
+          
+          console.log(`[OpenCode] Process exited with code ${exitCode} (${durationMs}ms)`)
 
           const result: OpenCodeTaskResult = {
             success,
@@ -361,7 +404,128 @@ class OpenCodeSidecar extends EventEmitter {
       this.ptyProcess = null
     }
     this.outputBuffer = ''
+    this.lastPermissionPrompt = ''
   }
+
+  private lastPermissionPrompt = ''
+
+  /**
+   * Detect permission prompts in OpenCode output
+   * Returns parsed permission request or null if not a permission prompt
+   */
+  private detectPermissionPrompt(output: string): PermissionRequest | null {
+    // Common patterns for permission prompts in OpenCode/agentic CLIs
+    // These patterns match various CLI tool permission requests
+    const patterns = [
+      // File operations: "Create file src/utils/helper.ts? [y/n]"
+      /(?:Create|Write|Overwrite|Delete|Remove|Modify|Edit|Update)\s+(?:file\s+)?['"`]?([^'"`?\n]+)['"`]?\s*\??\s*\[([yYnN]\/[yYnN])\]/i,
+      // Directory operations: "Create directory src/components? [y/n]"
+      /(?:Create|Delete|Remove)\s+(?:directory|folder|dir)\s+['"`]?([^'"`?\n]+)['"`]?\s*\??\s*\[([yYnN]\/[yYnN])\]/i,
+      // Shell commands: "Run command: npm install? [y/n]"
+      /(?:Run|Execute)\s+(?:command|shell)?\s*:?\s*['"`]?([^'"`?\n]+)['"`]?\s*\??\s*\[([yYnN]\/[yYnN])\]/i,
+      // Generic: "Allow X? [y/n]" or "Proceed with X? [y/n]"
+      /(?:Allow|Proceed with|Confirm|Approve)\s+['"`]?([^'"`?\n]+)['"`]?\s*\??\s*\[([yYnN]\/[yYnN])\]/i,
+      // OpenCode specific: "Tool call: write_file(...)" followed by approval prompt
+      /Tool\s+(?:call|request):\s*(\w+)\s*\([^)]*\)[^\[]*\[([yYnN]\/[yYnN])\]/i,
+      // Simple y/n at end of line with context
+      /([^\n]{10,})\s*\[([yYnN]\/[yYnN])\]\s*$/i,
+    ]
+
+    // Get the last few lines of output (permission prompts are usually at the end)
+    const lines = output.split('\n')
+    const recentOutput = lines.slice(-10).join('\n')
+
+    // Don't re-emit the same prompt
+    if (this.lastPermissionPrompt && recentOutput.includes(this.lastPermissionPrompt)) {
+      return null
+    }
+
+    for (const pattern of patterns) {
+      const match = recentOutput.match(pattern)
+      if (match) {
+        const action = match[1]?.trim() || 'Unknown action'
+        
+        // Determine the type of permission
+        let type: 'file_write' | 'file_delete' | 'shell_command' | 'other' = 'other'
+        const lowerOutput = recentOutput.toLowerCase()
+        if (lowerOutput.includes('create') || lowerOutput.includes('write') || lowerOutput.includes('modify')) {
+          type = 'file_write'
+        } else if (lowerOutput.includes('delete') || lowerOutput.includes('remove')) {
+          type = 'file_delete'
+        } else if (lowerOutput.includes('run') || lowerOutput.includes('execute') || lowerOutput.includes('command')) {
+          type = 'shell_command'
+        }
+
+        this.lastPermissionPrompt = action
+        
+        return {
+          type,
+          action,
+          context: recentOutput.trim(),
+          timestamp: Date.now(),
+        }
+      }
+    }
+
+    return null
+  }
+
+  /**
+   * Detect access/permission errors in OpenCode output
+   */
+  private detectAccessError(output: string): AccessError | null {
+    // Permission denied errors
+    if (output.includes('EACCES') || output.includes('EPERM') || output.includes('permission denied') || output.includes('operation not permitted')) {
+      // Check for specific config directory issue
+      if (output.includes('.config/opencode') || output.includes('.config')) {
+        return {
+          type: 'permission_denied',
+          message: 'Cannot access ~/.config directory (owned by root)',
+          fix: 'Open Terminal and run: sudo chown -R $(whoami) ~/.config',
+        }
+      }
+      return {
+        type: 'permission_denied',
+        message: 'Permission denied',
+        fix: 'Check file/directory permissions',
+      }
+    }
+
+    // API key errors
+    if (output.includes('API key') || output.includes('ANTHROPIC_API_KEY') || 
+        output.includes('OPENAI_API_KEY') || output.includes('unauthorized') ||
+        output.includes('401')) {
+      return {
+        type: 'api_key_missing',
+        message: 'OpenCode API key not configured',
+        fix: 'Set ANTHROPIC_API_KEY or OPENAI_API_KEY environment variable, or configure in OpenCode settings',
+      }
+    }
+
+    // Not configured
+    if (output.includes('not configured') || output.includes('missing configuration')) {
+      return {
+        type: 'not_configured',
+        message: 'OpenCode is not configured',
+        fix: 'Run "opencode" in terminal to complete setup',
+      }
+    }
+
+    return null
+  }
+}
+
+export interface PermissionRequest {
+  type: 'file_write' | 'file_delete' | 'shell_command' | 'other'
+  action: string
+  context: string
+  timestamp: number
+}
+
+export interface AccessError {
+  type: 'permission_denied' | 'not_configured' | 'api_key_missing' | 'other'
+  message: string
+  fix?: string
 }
 
 // ============================================================================
@@ -394,6 +558,41 @@ export class OpenCodeService extends EventEmitter {
           },
         }
         this.emit('event', createEvent(EventTypes.OPENCODE_OUTPUT, payload, this.activeJob.id))
+      }
+    })
+
+    // Handle permission requests from OpenCode
+    this.sidecar.on('permissionRequest', (request: PermissionRequest) => {
+      if (this.activeJob) {
+        console.log('[OpenCodeService] Permission request detected:', request)
+        const payload: OpenCodePermissionRequestPayload = {
+          jobId: this.activeJob.id,
+          type: request.type,
+          action: request.action,
+          context: request.context,
+        }
+        this.emit('event', createEvent(EventTypes.OPENCODE_PERMISSION_REQUEST, payload, this.activeJob.id))
+      }
+    })
+
+    // Handle access errors from OpenCode
+    this.sidecar.on('accessError', (error: AccessError) => {
+      console.log('[OpenCodeService] Access error detected:', error)
+      if (this.activeJob) {
+        // Emit as a failed event with detailed error info
+        const payload: OpenCodeFailedPayload = {
+          jobId: this.activeJob.id,
+          error: `${error.message}${error.fix ? `\n\nFix: ${error.fix}` : ''}`,
+        }
+        this.emit('event', createEvent(EventTypes.OPENCODE_FAILED, payload, this.activeJob.id))
+        
+        // Also emit a special access error event for UI handling
+        this.emit('event', createEvent('opencode-access-error' as any, {
+          jobId: this.activeJob.id,
+          type: error.type,
+          message: error.message,
+          fix: error.fix,
+        }, this.activeJob.id))
       }
     })
 

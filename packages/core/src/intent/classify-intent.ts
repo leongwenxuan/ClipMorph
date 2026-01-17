@@ -203,6 +203,32 @@ const INTENT_PATTERNS: IntentPattern[] = [
     keywords: ['improve', 'optimize', 'enhance', 'make better', 'make faster'],
     priority: 40,
   },
+  {
+    intent: 'code:convert',
+    patterns: [
+      /convert\s*(this|the)?\s*(code|file|to)?\s*(to\s*)?(typescript|ts|javascript|js|python|py|java|go|rust)/i,
+      /migrate\s*(this|the)?\s*(code|file)?\s*(to\s*)?(typescript|ts|javascript|js)/i,
+      /transform\s*(this|the)?\s*(code)?\s*(to|into)\s*(typescript|ts)/i,
+      /change\s*(this|the)?\s*(code)?\s*(to|into)\s*(typescript|ts)/i,
+      /port\s*(this|the)?\s*(code)?\s*(to\s*)?(typescript|ts|python|java)/i,
+      /add\s*types?\s*(to\s*)?(this|the)?\s*(code|file)?/i,
+      /typescript\s*(this|convert)/i,
+    ],
+    keywords: ['convert to typescript', 'migrate to ts', 'add types', 'convert to ts', 'port to'],
+    priority: 40,
+  },
+  // Direct OpenCode trigger - use "opencode" or "code agent" prefix
+  {
+    intent: 'code:generate',
+    patterns: [
+      /^opencode\s+/i,           // "opencode do something"
+      /^code\s*agent\s+/i,       // "code agent do something"  
+      /^agent\s+code\s+/i,       // "agent code something"
+      /^use\s*opencode\s+/i,     // "use opencode to..."
+    ],
+    keywords: ['opencode', 'code agent'],
+    priority: 60, // High priority to override other matches
+  },
 
   // Workflow intents (multi-stage)
   {

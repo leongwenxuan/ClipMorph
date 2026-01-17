@@ -41,6 +41,7 @@ import { skillService } from './skill-service'
 import { documentExtractorService } from './document-extractor-service'
 import { chartRendererService } from './chart-renderer-service'
 import { storeService } from './store-service'
+import { llmIntentService } from './llm-intent-service'
 import { app } from 'electron'
 import { writeFileSync, mkdirSync, existsSync } from 'fs'
 import { join } from 'path'
@@ -200,27 +201,81 @@ class IntentService {
       return this.handleSubagentIntent(classification, subagentMatch.subagentId)
     }
 
-    // Classify the intent using standard patterns
-    const classification = classifyIntent(transcript)
-    const { intent } = classification
+    // Check if we should use LLM-only classification
+    const useLLMOnly = storeService.getSetting('intent_mode') === 'llm'
+    
+    let classification: IntentClassification
+    let intent: Intent
 
-    console.log(
-      `[IntentService] Classified "${transcript}" as ${intent} (confidence: ${classification.confidence})`
-    )
+    if (useLLMOnly) {
+      // LLM-only mode: skip regex, use Cerebras/OpenAI directly
+      console.log(`[IntentService] Using LLM-only classification for "${transcript}"`)
+      try {
+        const llmResult = await llmIntentService.classifyIntent(transcript)
+        console.log(
+          `[IntentService] LLM classified "${transcript}" as ${llmResult.intent} (confidence: ${llmResult.confidence}, reason: ${llmResult.reasoning})`
+        )
+        classification = {
+          intent: llmResult.intent,
+          confidence: llmResult.confidence,
+          rawTranscript: transcript,
+          normalizedTranscript: transcript.toLowerCase().trim(),
+          matchedPatterns: [`llm:${llmResult.reasoning || 'classified'}`],
+        }
+        intent = llmResult.intent
+      } catch (err) {
+        console.error(`[IntentService] LLM classification failed, falling back to regex:`, err)
+        // Fall back to regex if LLM fails
+        classification = classifyIntent(transcript)
+        intent = classification.intent
+      }
+    } else {
+      // Default: regex classification with optional LLM fallback
+      classification = classifyIntent(transcript)
+      intent = classification.intent
+
+      console.log(
+        `[IntentService] Regex classified "${transcript}" as ${intent} (confidence: ${classification.confidence})`
+      )
+
+      // If regex confidence is low, try LLM classification as fallback
+      const useLLMFallback = storeService.getSetting('use_llm_intent') !== 'false'
+      if (useLLMFallback && classification.confidence < 0.5 && intent === 'unsupported') {
+        try {
+          console.log(`[IntentService] Low confidence, trying LLM classification...`)
+          const llmResult = await llmIntentService.classifyIntent(transcript)
+          console.log(
+            `[IntentService] LLM classified "${transcript}" as ${llmResult.intent} (confidence: ${llmResult.confidence}, reason: ${llmResult.reasoning})`
+          )
+          
+          if (llmResult.confidence > classification.confidence) {
+            classification = {
+              ...classification,
+              intent: llmResult.intent,
+              confidence: llmResult.confidence,
+              matchedPatterns: [`llm:${llmResult.reasoning || 'classified'}`],
+            }
+            intent = llmResult.intent
+          }
+        } catch (err) {
+          console.error(`[IntentService] LLM classification failed:`, err)
+        }
+      }
+    }
 
     // Handle special intents (cancel, undo) - always hardcoded
     if (isSpecialIntent(intent)) {
       return this.handleSpecialIntent(classification)
     }
 
+    // Handle code intents (OpenCode) - check BEFORE browser to avoid "opencode" matching "open"
+    if (isCodeIntent(intent)) {
+      return this.handleCodeIntent(classification)
+    }
+
     // Handle automation/browser intents
     if (isAutomationIntent(intent) || this.isBrowserTask(transcript)) {
       return this.handleBrowserIntent(classification)
-    }
-
-    // Handle code intents (OpenCode)
-    if (isCodeIntent(intent)) {
-      return this.handleCodeIntent(classification)
     }
 
     // Handle subagent intents (if classified as such)
@@ -704,6 +759,23 @@ class IntentService {
   }
 
   /**
+   * Check if text looks like a file path
+   */
+  private isFilePath(text: string): boolean {
+    if (!text) return false
+    const trimmed = text.trim()
+    // Check for common file path patterns
+    return (
+      trimmed.startsWith('/') || // Unix absolute path
+      trimmed.startsWith('~/') || // Home directory
+      trimmed.startsWith('./') || // Relative path
+      trimmed.startsWith('../') || // Parent relative path
+      /^[a-zA-Z]:\\/.test(trimmed) || // Windows path
+      /^\w+\.(js|ts|tsx|jsx|py|java|go|rs|rb|php|css|html|json|yaml|yml|md|txt)$/.test(trimmed) // Just filename with extension
+    )
+  }
+
+  /**
    * Handle code intents (OpenCode CLI)
    */
   private async handleCodeIntent(
@@ -717,6 +789,19 @@ class IntentService {
 
     // Build prompt from transcript
     let prompt = classification.rawTranscript
+    let context = clipboardText || undefined
+
+    // Check if clipboard contains a file path - if so, enhance the prompt
+    if (clipboardText && this.isFilePath(clipboardText)) {
+      const filePath = clipboardText.trim()
+      prompt = `${classification.rawTranscript}\n\nTarget file: ${filePath}`
+      context = undefined // Don't pass file path as context, it's now in the prompt
+      console.log(`[IntentService] Detected file path in clipboard: ${filePath}`)
+    } else if (clipboardText && clipboardText.length > 0) {
+      // If clipboard has code, tell OpenCode it's code context
+      prompt = `${classification.rawTranscript}\n\nHere is the code from clipboard to work with:\n\`\`\`\n${clipboardText}\n\`\`\``
+      context = undefined // Already included in prompt
+    }
 
     // Match and apply relevant skills
     const matchedSkills = skillService.matchSkillsForTask(prompt)
@@ -725,13 +810,18 @@ class IntentService {
       console.log(`[IntentService] Applied ${matchedSkills.length} skill(s): ${matchedSkills.map(s => s.name).join(', ')}`)
     }
 
+    // Get working directory from settings (defaults to home directory)
+    const opencodeCwd = storeService.getSetting('opencode_cwd') || process.env.HOME || process.cwd()
+    
     console.log(`[IntentService] Starting OpenCode task for intent ${intent}: "${classification.rawTranscript}"`)
+    console.log(`[IntentService] Working directory: ${opencodeCwd}`)
 
     try {
       // Run the OpenCode task
       const result = await openCodeService.runTask({
         prompt,
-        context: clipboardText || undefined,
+        context,
+        cwd: opencodeCwd,
       })
 
       console.log(`[IntentService] Started OpenCode job ${result.jobId}`)

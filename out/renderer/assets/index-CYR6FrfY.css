@@ -754,6 +754,224 @@
   font-size: 12px;
   padding: 20px;
 }
+.permission-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+  backdrop-filter: blur(4px);
+  animation: fadeIn 0.15s ease-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideIn {
+  from { 
+    opacity: 0;
+    transform: scale(0.95) translateY(-10px);
+  }
+  to { 
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.permission-modal {
+  background: #1a1a2e;
+  border-radius: 12px;
+  width: 90%;
+  max-width: 480px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  animation: slideIn 0.2s ease-out;
+  overflow: hidden;
+}
+
+/* Warning level borders */
+.permission-modal.low {
+  border-left: 4px solid #3b82f6;
+}
+
+.permission-modal.medium {
+  border-left: 4px solid #f59e0b;
+}
+
+.permission-modal.high {
+  border-left: 4px solid #ef4444;
+}
+
+.permission-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 20px;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.permission-icon {
+  font-size: 24px;
+}
+
+.permission-header h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.permission-body {
+  padding: 20px;
+}
+
+.permission-question {
+  margin: 0 0 12px 0;
+  color: #9ca3af;
+  font-size: 14px;
+}
+
+.permission-action {
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 8px;
+  padding: 12px 16px;
+  font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
+  font-size: 13px;
+  color: #e5e7eb;
+  word-break: break-word;
+  line-height: 1.5;
+}
+
+.permission-context {
+  margin-top: 12px;
+}
+
+.permission-context summary {
+  cursor: pointer;
+  color: #6b7280;
+  font-size: 12px;
+  padding: 4px 0;
+}
+
+.permission-context summary:hover {
+  color: #9ca3af;
+}
+
+.permission-context pre {
+  margin: 8px 0 0 0;
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 6px;
+  font-size: 11px;
+  color: #9ca3af;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.permission-footer {
+  display: flex;
+  gap: 12px;
+  padding: 16px 20px;
+  background: rgba(255, 255, 255, 0.02);
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.permission-btn {
+  flex: 1;
+  padding: 10px 16px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  border: none;
+}
+
+.permission-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.permission-btn.deny {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.permission-btn.deny:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.25);
+}
+
+.permission-btn.approve {
+  background: rgba(34, 197, 94, 0.15);
+  color: #22c55e;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+.permission-btn.approve:hover:not(:disabled) {
+  background: rgba(34, 197, 94, 0.25);
+}
+
+.permission-hint {
+  text-align: center;
+  padding: 8px 20px 16px;
+  font-size: 11px;
+  color: #6b7280;
+}
+
+.permission-hint kbd {
+  display: inline-block;
+  padding: 2px 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 10px;
+  margin: 0 2px;
+}
+
+/* Error display */
+.error-message {
+  color: #ef4444;
+  font-weight: 500;
+}
+
+.error-fix {
+  margin-top: 12px;
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 8px;
+  border-left: 3px solid #f59e0b;
+}
+
+.error-fix strong {
+  display: block;
+  color: #f59e0b;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.error-fix code {
+  display: block;
+  font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
+  font-size: 12px;
+  color: #e5e7eb;
+  background: rgba(0, 0, 0, 0.3);
+  padding: 8px 12px;
+  border-radius: 4px;
+  word-break: break-all;
+  user-select: all;
+  cursor: text;
+}
 /* LastAction Component Styles */
 
 .last-action {

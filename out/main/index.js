@@ -177,6 +177,7 @@ const EventTypes = {
   AUTOMATION_CANCELLED: "automation-cancelled",
   OPENCODE_STARTED: "opencode-started",
   OPENCODE_OUTPUT: "opencode-output",
+  OPENCODE_PERMISSION_REQUEST: "opencode-permission-request",
   OPENCODE_COMPLETED: "opencode-completed",
   OPENCODE_FAILED: "opencode-failed",
   OPENCODE_CANCELLED: "opencode-cancelled",
@@ -1306,6 +1307,37 @@ const INTENT_PATTERNS = [
     ],
     keywords: ["improve", "optimize", "enhance", "make better", "make faster"],
     priority: 40
+  },
+  {
+    intent: "code:convert",
+    patterns: [
+      /convert\s*(this|the)?\s*(code|file|to)?\s*(to\s*)?(typescript|ts|javascript|js|python|py|java|go|rust)/i,
+      /migrate\s*(this|the)?\s*(code|file)?\s*(to\s*)?(typescript|ts|javascript|js)/i,
+      /transform\s*(this|the)?\s*(code)?\s*(to|into)\s*(typescript|ts)/i,
+      /change\s*(this|the)?\s*(code)?\s*(to|into)\s*(typescript|ts)/i,
+      /port\s*(this|the)?\s*(code)?\s*(to\s*)?(typescript|ts|python|java)/i,
+      /add\s*types?\s*(to\s*)?(this|the)?\s*(code|file)?/i,
+      /typescript\s*(this|convert)/i
+    ],
+    keywords: ["convert to typescript", "migrate to ts", "add types", "convert to ts", "port to"],
+    priority: 40
+  },
+  // Direct OpenCode trigger - use "opencode" or "code agent" prefix
+  {
+    intent: "code:generate",
+    patterns: [
+      /^opencode\s+/i,
+      // "opencode do something"
+      /^code\s*agent\s+/i,
+      // "code agent do something"  
+      /^agent\s+code\s+/i,
+      // "agent code something"
+      /^use\s*opencode\s+/i
+      // "use opencode to..."
+    ],
+    keywords: ["opencode", "code agent"],
+    priority: 60
+    // High priority to override other matches
   },
   // Workflow intents (multi-stage)
   {
@@ -3012,22 +3044,37 @@ class OpenCodeSidecar extends events.EventEmitter {
           const escapedContext = request.context.replace(/'/g, "'\\''");
           command += ` --context '${escapedContext}'`;
         }
-        this.ptyProcess = pty__namespace.spawn(this.binaryPath, [request.prompt], {
+        const args = ["run", request.prompt];
+        const autoApprove = process.env.OPENCODE_AUTO_APPROVE === "true";
+        if (autoApprove) {
+          args.push("--yes");
+        }
+        const { app } = require("electron");
+        const opencodeConfigDir = require("path").join(app.getPath("userData"), "opencode-config");
+        console.log("[OpenCode] Starting:", this.binaryPath, args.join(" "));
+        console.log("[OpenCode] Working directory:", request.cwd || process.cwd());
+        this.ptyProcess = pty__namespace.spawn(this.binaryPath, args, {
           name: "xterm-256color",
           cols: 120,
           rows: 30,
           cwd: request.cwd || process.cwd(),
           env: {
             ...process.env,
-            CI: "true",
-            // Disable interactive prompts
+            // Don't set CI=true - we want interactive mode for permission handling
             NO_COLOR: "1",
             // Disable ANSI colors for cleaner output
-            TERM: "xterm-256color"
+            TERM: "xterm-256color",
+            // Override OpenCode's config directory to avoid ~/.config permission issues
+            XDG_CONFIG_HOME: opencodeConfigDir,
+            OPENCODE_CONFIG_DIR: opencodeConfigDir
           }
         });
         this.ptyProcess.onData((data) => {
           this.outputBuffer += data;
+          const cleanData = data.replace(/\x1b\[[0-9;]*m/g, "").trim();
+          if (cleanData) {
+            console.log("[OpenCode]", cleanData);
+          }
           const chunk = {
             type: "stdout",
             // PTY combines stdout/stderr
@@ -3035,11 +3082,20 @@ class OpenCodeSidecar extends events.EventEmitter {
             timestamp: Date.now()
           };
           this.emit("output", chunk);
+          const accessError = this.detectAccessError(data);
+          if (accessError) {
+            this.emit("accessError", accessError);
+          }
+          const permissionRequest = this.detectPermissionPrompt(this.outputBuffer);
+          if (permissionRequest) {
+            this.emit("permissionRequest", permissionRequest);
+          }
         });
         this.ptyProcess.onExit(({ exitCode, signal }) => {
           this.clearTaskTimeout();
           const durationMs = Date.now() - startTime;
           const success = exitCode === 0;
+          console.log(`[OpenCode] Process exited with code ${exitCode} (${durationMs}ms)`);
           const result = {
             success,
             output: this.outputBuffer,
@@ -3115,6 +3171,90 @@ class OpenCodeSidecar extends events.EventEmitter {
       this.ptyProcess = null;
     }
     this.outputBuffer = "";
+    this.lastPermissionPrompt = "";
+  }
+  lastPermissionPrompt = "";
+  /**
+   * Detect permission prompts in OpenCode output
+   * Returns parsed permission request or null if not a permission prompt
+   */
+  detectPermissionPrompt(output) {
+    const patterns = [
+      // File operations: "Create file src/utils/helper.ts? [y/n]"
+      /(?:Create|Write|Overwrite|Delete|Remove|Modify|Edit|Update)\s+(?:file\s+)?['"`]?([^'"`?\n]+)['"`]?\s*\??\s*\[([yYnN]\/[yYnN])\]/i,
+      // Directory operations: "Create directory src/components? [y/n]"
+      /(?:Create|Delete|Remove)\s+(?:directory|folder|dir)\s+['"`]?([^'"`?\n]+)['"`]?\s*\??\s*\[([yYnN]\/[yYnN])\]/i,
+      // Shell commands: "Run command: npm install? [y/n]"
+      /(?:Run|Execute)\s+(?:command|shell)?\s*:?\s*['"`]?([^'"`?\n]+)['"`]?\s*\??\s*\[([yYnN]\/[yYnN])\]/i,
+      // Generic: "Allow X? [y/n]" or "Proceed with X? [y/n]"
+      /(?:Allow|Proceed with|Confirm|Approve)\s+['"`]?([^'"`?\n]+)['"`]?\s*\??\s*\[([yYnN]\/[yYnN])\]/i,
+      // OpenCode specific: "Tool call: write_file(...)" followed by approval prompt
+      /Tool\s+(?:call|request):\s*(\w+)\s*\([^)]*\)[^\[]*\[([yYnN]\/[yYnN])\]/i,
+      // Simple y/n at end of line with context
+      /([^\n]{10,})\s*\[([yYnN]\/[yYnN])\]\s*$/i
+    ];
+    const lines = output.split("\n");
+    const recentOutput = lines.slice(-10).join("\n");
+    if (this.lastPermissionPrompt && recentOutput.includes(this.lastPermissionPrompt)) {
+      return null;
+    }
+    for (const pattern of patterns) {
+      const match = recentOutput.match(pattern);
+      if (match) {
+        const action = match[1]?.trim() || "Unknown action";
+        let type = "other";
+        const lowerOutput = recentOutput.toLowerCase();
+        if (lowerOutput.includes("create") || lowerOutput.includes("write") || lowerOutput.includes("modify")) {
+          type = "file_write";
+        } else if (lowerOutput.includes("delete") || lowerOutput.includes("remove")) {
+          type = "file_delete";
+        } else if (lowerOutput.includes("run") || lowerOutput.includes("execute") || lowerOutput.includes("command")) {
+          type = "shell_command";
+        }
+        this.lastPermissionPrompt = action;
+        return {
+          type,
+          action,
+          context: recentOutput.trim(),
+          timestamp: Date.now()
+        };
+      }
+    }
+    return null;
+  }
+  /**
+   * Detect access/permission errors in OpenCode output
+   */
+  detectAccessError(output) {
+    if (output.includes("EACCES") || output.includes("EPERM") || output.includes("permission denied") || output.includes("operation not permitted")) {
+      if (output.includes(".config/opencode") || output.includes(".config")) {
+        return {
+          type: "permission_denied",
+          message: "Cannot access ~/.config directory (owned by root)",
+          fix: "Open Terminal and run: sudo chown -R $(whoami) ~/.config"
+        };
+      }
+      return {
+        type: "permission_denied",
+        message: "Permission denied",
+        fix: "Check file/directory permissions"
+      };
+    }
+    if (output.includes("API key") || output.includes("ANTHROPIC_API_KEY") || output.includes("OPENAI_API_KEY") || output.includes("unauthorized") || output.includes("401")) {
+      return {
+        type: "api_key_missing",
+        message: "OpenCode API key not configured",
+        fix: "Set ANTHROPIC_API_KEY or OPENAI_API_KEY environment variable, or configure in OpenCode settings"
+      };
+    }
+    if (output.includes("not configured") || output.includes("missing configuration")) {
+      return {
+        type: "not_configured",
+        message: "OpenCode is not configured",
+        fix: 'Run "opencode" in terminal to complete setup'
+      };
+    }
+    return null;
   }
 }
 class OpenCodeService extends events.EventEmitter {
@@ -3140,6 +3280,36 @@ class OpenCodeService extends events.EventEmitter {
           }
         };
         this.emit("event", createEvent(EventTypes.OPENCODE_OUTPUT, payload, this.activeJob.id));
+      }
+    });
+    this.sidecar.on("permissionRequest", (request) => {
+      if (this.activeJob) {
+        console.log("[OpenCodeService] Permission request detected:", request);
+        const payload = {
+          jobId: this.activeJob.id,
+          type: request.type,
+          action: request.action,
+          context: request.context
+        };
+        this.emit("event", createEvent(EventTypes.OPENCODE_PERMISSION_REQUEST, payload, this.activeJob.id));
+      }
+    });
+    this.sidecar.on("accessError", (error) => {
+      console.log("[OpenCodeService] Access error detected:", error);
+      if (this.activeJob) {
+        const payload = {
+          jobId: this.activeJob.id,
+          error: `${error.message}${error.fix ? `
+
+Fix: ${error.fix}` : ""}`
+        };
+        this.emit("event", createEvent(EventTypes.OPENCODE_FAILED, payload, this.activeJob.id));
+        this.emit("event", createEvent("opencode-access-error", {
+          jobId: this.activeJob.id,
+          type: error.type,
+          message: error.message,
+          fix: error.fix
+        }, this.activeJob.id));
       }
     });
     this.sidecar.on("taskCompleted", (result) => {
@@ -5018,6 +5188,154 @@ Generate the Chart.js config JSON:`
   }
 }
 const chartRendererService = new ChartRendererService();
+const CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1";
+class LLMIntentService {
+  client = null;
+  apiKey = null;
+  /**
+   * Get Cerebras client (falls back to OpenAI if no Cerebras key)
+   */
+  async getClient() {
+    const cerebrasKey = await secretsService.getCerebrasKey();
+    if (cerebrasKey) {
+      if (!this.client || this.apiKey !== cerebrasKey) {
+        this.apiKey = cerebrasKey;
+        this.client = new OpenAI({
+          apiKey: cerebrasKey,
+          baseURL: CEREBRAS_BASE_URL
+        });
+      }
+      return { client: this.client, model: "llama-3.3-70b" };
+    }
+    const openaiKey = await secretsService.getOpenAIKey();
+    if (openaiKey) {
+      if (!this.client || this.apiKey !== openaiKey) {
+        this.apiKey = openaiKey;
+        this.client = new OpenAI({ apiKey: openaiKey });
+      }
+      return { client: this.client, model: "gpt-4o-mini" };
+    }
+    throw new Error("No API key configured (Cerebras or OpenAI)");
+  }
+  /**
+   * Classify intent using LLM
+   */
+  async classifyIntent(transcript) {
+    const { client, model } = await this.getClient();
+    const systemPrompt = `You are an intent classifier for a voice-controlled clipboard assistant called ClipMorph.
+
+Given a user's voice command, classify it into ONE of these intents:
+
+CODE INTENTS (use OpenCode CLI for agentic coding):
+- code:generate - Create new code, functions, components, classes
+- code:refactor - Refactor, restructure, rewrite existing code
+- code:fix - Fix bugs, debug, repair code
+- code:explain - Explain what code does
+- code:improve - Optimize, enhance, make code better
+- code:convert - Convert code to another language (e.g., TypeScript)
+
+TRANSFORM INTENTS (use LLM to transform clipboard text):
+- Use "transform" for: summarize, translate, reformat, shorten, expand, clean up text, extract info, etc.
+
+BROWSER INTENTS (automate web browser):
+- automation:portal - Fill forms, click buttons, navigate websites, sign up, log in
+
+FILE INTENTS (file system operations):
+- file:organize - Organize/sort files
+- file:rename - Rename files
+- file:move - Move files
+- file:delete - Delete files
+- file:copy - Copy files
+
+SPECIAL INTENTS:
+- cancel - Cancel current operation
+- undo - Undo last action
+
+If the command is about writing, creating, or modifying CODE/FUNCTIONS/COMPONENTS → use code:* intents
+If the command is about transforming TEXT content → use "transform"
+If unsure, use "transform" as the safe default.
+
+Respond with JSON only: {"intent": "<intent>", "confidence": <0.0-1.0>, "reasoning": "<brief explanation>"}`;
+    const response = await client.chat.completions.create({
+      model,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: `Classify this command: "${transcript}"` }
+      ],
+      temperature: 0.1,
+      max_tokens: 150
+    });
+    const content = response.choices[0]?.message?.content || "";
+    try {
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        let intent = parsed.intent;
+        if (intent === "transform" || !this.isValidIntent(intent)) {
+          intent = "unsupported";
+        }
+        return {
+          intent,
+          confidence: Math.min(1, Math.max(0, parsed.confidence || 0.7)),
+          reasoning: parsed.reasoning
+        };
+      }
+    } catch (e) {
+      console.error("[LLMIntentService] Failed to parse response:", content, e);
+    }
+    return {
+      intent: "unsupported",
+      confidence: 0.5,
+      reasoning: "Failed to parse LLM response"
+    };
+  }
+  /**
+   * Check if intent is valid
+   */
+  isValidIntent(intent) {
+    const validIntents = [
+      "code:generate",
+      "code:refactor",
+      "code:fix",
+      "code:explain",
+      "code:improve",
+      "code:convert",
+      "automation:portal",
+      "file:organize",
+      "file:rename",
+      "file:move",
+      "file:delete",
+      "file:copy",
+      "file:find",
+      "cancel",
+      "undo",
+      "url:clean",
+      "url:markdown",
+      "json:pretty",
+      "json:minify",
+      "json:to-yaml",
+      "yaml:to-json",
+      "extract:emails",
+      "extract:links",
+      "redact:secrets",
+      "unsupported"
+    ];
+    return validIntents.includes(intent);
+  }
+  /**
+   * Check if LLM classification is available
+   */
+  async isAvailable() {
+    try {
+      const cerebrasKey = await secretsService.getCerebrasKey();
+      const openaiKey = await secretsService.getOpenAIKey();
+      return !!(cerebrasKey || openaiKey);
+    } catch {
+      return false;
+    }
+  }
+}
+const llmIntentService = new LLMIntentService();
 class IntentService {
   eventEmitter = null;
   lastAction = null;
@@ -5145,19 +5463,65 @@ class IntentService {
       );
       return this.handleSubagentIntent(classification2, subagentMatch.subagentId);
     }
-    const classification = classifyIntent(transcript);
-    const { intent } = classification;
-    console.log(
-      `[IntentService] Classified "${transcript}" as ${intent} (confidence: ${classification.confidence})`
-    );
+    const useLLMOnly = storeService.getSetting("intent_mode") === "llm";
+    let classification;
+    let intent;
+    if (useLLMOnly) {
+      console.log(`[IntentService] Using LLM-only classification for "${transcript}"`);
+      try {
+        const llmResult = await llmIntentService.classifyIntent(transcript);
+        console.log(
+          `[IntentService] LLM classified "${transcript}" as ${llmResult.intent} (confidence: ${llmResult.confidence}, reason: ${llmResult.reasoning})`
+        );
+        classification = {
+          intent: llmResult.intent,
+          confidence: llmResult.confidence,
+          rawTranscript: transcript,
+          normalizedTranscript: transcript.toLowerCase().trim(),
+          matchedPatterns: [`llm:${llmResult.reasoning || "classified"}`]
+        };
+        intent = llmResult.intent;
+      } catch (err) {
+        console.error(`[IntentService] LLM classification failed, falling back to regex:`, err);
+        classification = classifyIntent(transcript);
+        intent = classification.intent;
+      }
+    } else {
+      classification = classifyIntent(transcript);
+      intent = classification.intent;
+      console.log(
+        `[IntentService] Regex classified "${transcript}" as ${intent} (confidence: ${classification.confidence})`
+      );
+      const useLLMFallback = storeService.getSetting("use_llm_intent") !== "false";
+      if (useLLMFallback && classification.confidence < 0.5 && intent === "unsupported") {
+        try {
+          console.log(`[IntentService] Low confidence, trying LLM classification...`);
+          const llmResult = await llmIntentService.classifyIntent(transcript);
+          console.log(
+            `[IntentService] LLM classified "${transcript}" as ${llmResult.intent} (confidence: ${llmResult.confidence}, reason: ${llmResult.reasoning})`
+          );
+          if (llmResult.confidence > classification.confidence) {
+            classification = {
+              ...classification,
+              intent: llmResult.intent,
+              confidence: llmResult.confidence,
+              matchedPatterns: [`llm:${llmResult.reasoning || "classified"}`]
+            };
+            intent = llmResult.intent;
+          }
+        } catch (err) {
+          console.error(`[IntentService] LLM classification failed:`, err);
+        }
+      }
+    }
     if (isSpecialIntent(intent)) {
       return this.handleSpecialIntent(classification);
     }
-    if (isAutomationIntent(intent) || this.isBrowserTask(transcript)) {
-      return this.handleBrowserIntent(classification);
-    }
     if (isCodeIntent(intent)) {
       return this.handleCodeIntent(classification);
+    }
+    if (isAutomationIntent(intent) || this.isBrowserTask(transcript)) {
+      return this.handleBrowserIntent(classification);
     }
     if (isSubagentIntent(intent)) {
       const subagentId = getSubagentIdFromIntent(intent);
@@ -5521,6 +5885,19 @@ class IntentService {
     };
   }
   /**
+   * Check if text looks like a file path
+   */
+  isFilePath(text) {
+    if (!text) return false;
+    const trimmed = text.trim();
+    return trimmed.startsWith("/") || // Unix absolute path
+    trimmed.startsWith("~/") || // Home directory
+    trimmed.startsWith("./") || // Relative path
+    trimmed.startsWith("../") || // Parent relative path
+    /^[a-zA-Z]:\\/.test(trimmed) || // Windows path
+    /^\w+\.(js|ts|tsx|jsx|py|java|go|rs|rb|php|css|html|json|yaml|yml|md|txt)$/.test(trimmed);
+  }
+  /**
    * Handle code intents (OpenCode CLI)
    */
   async handleCodeIntent(classification) {
@@ -5528,16 +5905,36 @@ class IntentService {
     const openCodeService = getOpenCodeService();
     const clipboardText = clipboardService.readClipboard();
     let prompt = classification.rawTranscript;
+    let context = clipboardText || void 0;
+    if (clipboardText && this.isFilePath(clipboardText)) {
+      const filePath = clipboardText.trim();
+      prompt = `${classification.rawTranscript}
+
+Target file: ${filePath}`;
+      context = void 0;
+      console.log(`[IntentService] Detected file path in clipboard: ${filePath}`);
+    } else if (clipboardText && clipboardText.length > 0) {
+      prompt = `${classification.rawTranscript}
+
+Here is the code from clipboard to work with:
+\`\`\`
+${clipboardText}
+\`\`\``;
+      context = void 0;
+    }
     const matchedSkills = skillService.matchSkillsForTask(prompt);
     if (matchedSkills.length > 0) {
       prompt = skillService.buildAugmentedPrompt(prompt, matchedSkills);
       console.log(`[IntentService] Applied ${matchedSkills.length} skill(s): ${matchedSkills.map((s) => s.name).join(", ")}`);
     }
+    const opencodeCwd = storeService.getSetting("opencode_cwd") || process.env.HOME || process.cwd();
     console.log(`[IntentService] Starting OpenCode task for intent ${intent}: "${classification.rawTranscript}"`);
+    console.log(`[IntentService] Working directory: ${opencodeCwd}`);
     try {
       const result = await openCodeService.runTask({
         prompt,
-        context: clipboardText || void 0
+        context,
+        cwd: opencodeCwd
       });
       console.log(`[IntentService] Started OpenCode job ${result.jobId}`);
       this.updateLastAction(classification.rawTranscript, intent, true, result.jobId);

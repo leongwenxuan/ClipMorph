@@ -29,6 +29,7 @@ export type CodeIntent =
   | 'code:fix'
   | 'code:explain'
   | 'code:improve'
+  | 'code:convert'
 
 // Subagent intent (dynamic - matched against custom triggers)
 export type SubagentIntent = `subagent:${string}`

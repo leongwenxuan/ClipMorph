@@ -6979,7 +6979,11 @@ const EventTypes = {
   AUTOMATION_COMPLETED: "automation-completed",
   AUTOMATION_FAILED: "automation-failed",
   AUTOMATION_NEEDS_INPUT: "automation-needs-input",
-  AUTOMATION_CANCELLED: "automation-cancelled"
+  AUTOMATION_CANCELLED: "automation-cancelled",
+  OPENCODE_PERMISSION_REQUEST: "opencode-permission-request",
+  OPENCODE_COMPLETED: "opencode-completed",
+  OPENCODE_FAILED: "opencode-failed",
+  OPENCODE_CANCELLED: "opencode-cancelled"
 };
 const CEREBRAS_MODELS = [
   { id: "llama3.1-8b", name: "Llama 3.1 8B", params: "8B", speed: "~2200 t/s" },
@@ -7730,6 +7734,210 @@ function OperationsHistory({ onClose }) {
     )) }) })
   ] }) });
 }
+function OpenCodePermissionModal({ onClose }) {
+  const [pendingPermission, setPendingPermission] = reactExports.useState(null);
+  const [accessError, setAccessError] = reactExports.useState(null);
+  const [responding, setResponding] = reactExports.useState(false);
+  const [wasExpanded, setWasExpanded] = reactExports.useState(false);
+  reactExports.useEffect(() => {
+    const shouldExpand = !!(pendingPermission || accessError);
+    if (shouldExpand) {
+      window.clipmorph.getWindowState().then((result) => {
+        if (result.success && !result.data.expanded) {
+          setWasExpanded(false);
+          window.clipmorph.toggleWindow();
+        } else {
+          setWasExpanded(true);
+        }
+      });
+    }
+  }, [pendingPermission, accessError]);
+  const closeAndRestore = reactExports.useCallback(() => {
+    if (!wasExpanded) {
+      window.clipmorph.toggleWindow();
+    }
+  }, [wasExpanded]);
+  reactExports.useEffect(() => {
+    const unsubscribe = window.clipmorph.onEvent((event) => {
+      if (event.type === EventTypes.OPENCODE_PERMISSION_REQUEST) {
+        const payload = event.payload;
+        console.log("[PermissionModal] Received permission request:", payload);
+        setPendingPermission({
+          jobId: payload.jobId,
+          type: payload.type,
+          action: payload.action,
+          context: payload.context,
+          timestamp: Date.now()
+        });
+      }
+      if (event.type === "opencode-access-error") {
+        const payload = event.payload;
+        console.log("[PermissionModal] Received access error:", payload);
+        setAccessError(payload);
+      }
+      if (event.type === EventTypes.OPENCODE_COMPLETED || event.type === EventTypes.OPENCODE_CANCELLED) {
+        setPendingPermission(null);
+      }
+      if (event.type === EventTypes.OPENCODE_FAILED && !accessError) {
+        setPendingPermission(null);
+      }
+    });
+    return () => unsubscribe();
+  }, [accessError]);
+  const handleApprove = reactExports.useCallback(async () => {
+    if (!pendingPermission || responding) return;
+    setResponding(true);
+    try {
+      const result = await window.clipmorph.respondToOpenCodePermission(true);
+      if (isIpcSuccess(result)) {
+        console.log("[PermissionModal] Approved permission");
+      }
+    } catch (err) {
+      console.error("[PermissionModal] Failed to approve:", err);
+    } finally {
+      setResponding(false);
+      setPendingPermission(null);
+      closeAndRestore();
+    }
+  }, [pendingPermission, responding, closeAndRestore]);
+  const handleDeny = reactExports.useCallback(async () => {
+    if (!pendingPermission || responding) return;
+    setResponding(true);
+    try {
+      const result = await window.clipmorph.respondToOpenCodePermission(false);
+      if (isIpcSuccess(result)) {
+        console.log("[PermissionModal] Denied permission");
+      }
+    } catch (err) {
+      console.error("[PermissionModal] Failed to deny:", err);
+    } finally {
+      setResponding(false);
+      setPendingPermission(null);
+      closeAndRestore();
+    }
+  }, [pendingPermission, responding, closeAndRestore]);
+  reactExports.useEffect(() => {
+    if (!pendingPermission) return;
+    const handleKeyDown = (e) => {
+      if (e.key === "y" || e.key === "Y") {
+        e.preventDefault();
+        handleApprove();
+      } else if (e.key === "n" || e.key === "N" || e.key === "Escape") {
+        e.preventDefault();
+        handleDeny();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [pendingPermission, handleApprove, handleDeny]);
+  const dismissError = () => {
+    setAccessError(null);
+    closeAndRestore();
+  };
+  if (accessError) {
+    return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "permission-modal-overlay", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "permission-modal high", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "permission-header", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "permission-icon", children: "⚠️" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { children: "OpenCode Error" })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "permission-body", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "permission-question error-message", children: accessError.message }),
+        accessError.fix && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "error-fix", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "How to fix:" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("code", { children: accessError.fix })
+        ] })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "permission-footer", children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          className: "permission-btn approve",
+          onClick: dismissError,
+          style: { flex: 1 },
+          children: "Dismiss"
+        }
+      ) })
+    ] }) });
+  }
+  if (!pendingPermission) return null;
+  const getIcon = (type) => {
+    switch (type) {
+      case "file_write":
+        return "📝";
+      case "file_delete":
+        return "🗑️";
+      case "shell_command":
+        return "⚡";
+      default:
+        return "❓";
+    }
+  };
+  const getTitle = (type) => {
+    switch (type) {
+      case "file_write":
+        return "File Operation";
+      case "file_delete":
+        return "Delete Operation";
+      case "shell_command":
+        return "Shell Command";
+      default:
+        return "Permission Request";
+    }
+  };
+  const getWarningLevel = (type) => {
+    switch (type) {
+      case "file_delete":
+        return "high";
+      case "shell_command":
+        return "medium";
+      default:
+        return "low";
+    }
+  };
+  const warningLevel = getWarningLevel(pendingPermission.type);
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "permission-modal-overlay", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `permission-modal ${warningLevel}`, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "permission-header", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "permission-icon", children: getIcon(pendingPermission.type) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { children: getTitle(pendingPermission.type) })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "permission-body", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "permission-question", children: "OpenCode wants to:" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "permission-action", children: pendingPermission.action }),
+      pendingPermission.context && /* @__PURE__ */ jsxRuntimeExports.jsxs("details", { className: "permission-context", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("summary", { children: "Show context" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { children: pendingPermission.context })
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "permission-footer", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          className: "permission-btn deny",
+          onClick: handleDeny,
+          disabled: responding,
+          children: "Deny (N)"
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          className: "permission-btn approve",
+          onClick: handleApprove,
+          disabled: responding,
+          children: "Approve (Y)"
+        }
+      )
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "permission-hint", children: [
+      "Press ",
+      /* @__PURE__ */ jsxRuntimeExports.jsx("kbd", { children: "Y" }),
+      " to approve, ",
+      /* @__PURE__ */ jsxRuntimeExports.jsx("kbd", { children: "N" }),
+      " or ",
+      /* @__PURE__ */ jsxRuntimeExports.jsx("kbd", { children: "Esc" }),
+      " to deny"
+    ] })
+  ] }) });
+}
 function LastAction() {
   const [lastAction, setLastAction] = reactExports.useState(null);
   const [visible, setVisible] = reactExports.useState(false);
@@ -8197,109 +8405,118 @@ function App() {
   };
   if (!isExpanded) {
     if (isRecording) {
-      return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "app compact recording", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "compact-recording-bar", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "recording-left", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "recording-dot-small" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "compact-waveform-large", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "wave-bar" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "wave-bar" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "wave-bar" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "wave-bar" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "wave-bar" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "wave-bar" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "wave-bar" })
+      return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "app compact recording", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "compact-recording-bar", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "recording-left", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "recording-dot-small" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "compact-waveform-large", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "wave-bar" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "wave-bar" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "wave-bar" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "wave-bar" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "wave-bar" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "wave-bar" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "wave-bar" })
+            ] })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "recording-actions", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                className: "recording-action-btn cancel",
+                onClick: handleCancelRecording,
+                title: "Cancel",
+                children: "✕"
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                className: "recording-action-btn done",
+                onClick: handleStopRecording,
+                title: "Done",
+                children: "✓"
+              }
+            )
           ] })
         ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "recording-actions", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "button",
-            {
-              className: "recording-action-btn cancel",
-              onClick: handleCancelRecording,
-              title: "Cancel",
-              children: "✕"
-            }
-          ),
-          /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "button",
-            {
-              className: "recording-action-btn done",
-              onClick: handleStopRecording,
-              title: "Done",
-              children: "✓"
-            }
-          )
-        ] })
-      ] }) });
+        /* @__PURE__ */ jsxRuntimeExports.jsx(OpenCodePermissionModal, {})
+      ] });
     }
     if (showTextInput) {
-      return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "app compact text-input-mode", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "compact-text-input-bar", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx(
-          "input",
-          {
-            ref: textInputRef,
-            type: "text",
-            className: "text-command-input",
-            placeholder: "Type command... (Enter to submit, Esc to cancel)",
-            value: textCommand,
-            onChange: (e) => setTextCommand(e.target.value),
-            onKeyDown: handleTextKeyDown,
-            disabled: isSubmitting,
-            autoFocus: true
-          }
-        ),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "text-input-actions", children: [
+      return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "app compact text-input-mode", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "compact-text-input-bar", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "button",
+            "input",
             {
-              className: "recording-action-btn cancel",
-              onClick: () => {
-                setShowTextInput(false);
-                setTextCommand("");
-              },
-              title: "Cancel",
+              ref: textInputRef,
+              type: "text",
+              className: "text-command-input",
+              placeholder: "Type command... (Enter to submit, Esc to cancel)",
+              value: textCommand,
+              onChange: (e) => setTextCommand(e.target.value),
+              onKeyDown: handleTextKeyDown,
               disabled: isSubmitting,
-              children: "✕"
+              autoFocus: true
             }
           ),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "text-input-actions", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                className: "recording-action-btn cancel",
+                onClick: () => {
+                  setShowTextInput(false);
+                  setTextCommand("");
+                },
+                title: "Cancel",
+                disabled: isSubmitting,
+                children: "✕"
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                className: "recording-action-btn done",
+                onClick: handleTextSubmit,
+                title: "Submit",
+                disabled: !textCommand.trim() || isSubmitting,
+                children: isSubmitting ? "..." : "→"
+              }
+            )
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(OpenCodePermissionModal, {})
+      ] });
+    }
+    return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "app compact", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "compact-bar", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "compact-status", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "div",
+            {
+              className: "status-dot",
+              style: { backgroundColor: getStatusColor() }
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "compact-status-text", children: getStatusText() })
+        ] }),
+        liveTranscript && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "compact-transcript", children: liveTranscript }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "compact-actions", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx(
             "button",
             {
-              className: "recording-action-btn done",
-              onClick: handleTextSubmit,
-              title: "Submit",
-              disabled: !textCommand.trim() || isSubmitting,
-              children: isSubmitting ? "..." : "→"
+              className: "compact-btn keyboard-btn",
+              onClick: toggleTextInput,
+              title: "Type command (instead of voice)",
+              children: "⌨"
             }
-          )
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "compact-btn", onClick: handleToggleWindow, title: "Expand", children: "▼" })
         ] })
-      ] }) });
-    }
-    return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "app compact", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "compact-bar", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "compact-status", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx(
-          "div",
-          {
-            className: "status-dot",
-            style: { backgroundColor: getStatusColor() }
-          }
-        ),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "compact-status-text", children: getStatusText() })
       ] }),
-      liveTranscript && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "compact-transcript", children: liveTranscript }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "compact-actions", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx(
-          "button",
-          {
-            className: "compact-btn keyboard-btn",
-            onClick: toggleTextInput,
-            title: "Type command (instead of voice)",
-            children: "⌨"
-          }
-        ),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "compact-btn", onClick: handleToggleWindow, title: "Expand", children: "▼" })
-      ] })
-    ] }) });
+      /* @__PURE__ */ jsxRuntimeExports.jsx(OpenCodePermissionModal, {})
+    ] });
   }
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `app expanded ${isRecording ? "recording" : ""}`, children: [
     isRecording && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "recording-overlay", children: [
@@ -8376,6 +8593,7 @@ function App() {
     ] }) }),
     showSettings && /* @__PURE__ */ jsxRuntimeExports.jsx(Settings, { onClose: () => setShowSettings(false) }),
     showHistory && /* @__PURE__ */ jsxRuntimeExports.jsx(OperationsHistory, { onClose: () => setShowHistory(false) }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx(OpenCodePermissionModal, {}),
     /* @__PURE__ */ jsxRuntimeExports.jsx(LastAction, {}),
     /* @__PURE__ */ jsxRuntimeExports.jsx(JobStatus, {})
   ] });

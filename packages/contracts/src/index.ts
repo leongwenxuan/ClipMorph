@@ -326,6 +326,7 @@ export const EventTypes = {
   AUTOMATION_CANCELLED: 'automation-cancelled',
   OPENCODE_STARTED: 'opencode-started',
   OPENCODE_OUTPUT: 'opencode-output',
+  OPENCODE_PERMISSION_REQUEST: 'opencode-permission-request',
   OPENCODE_COMPLETED: 'opencode-completed',
   OPENCODE_FAILED: 'opencode-failed',
   OPENCODE_CANCELLED: 'opencode-cancelled',
@@ -772,6 +773,13 @@ export interface OpenCodeStartedPayload {
 export interface OpenCodeOutputPayload {
   jobId: string
   chunk: OpenCodeOutputChunk
+}
+
+export interface OpenCodePermissionRequestPayload {
+  jobId: string
+  type: 'file_write' | 'file_delete' | 'shell_command' | 'other'
+  action: string
+  context: string
 }
 
 export interface OpenCodeCompletedPayload {
