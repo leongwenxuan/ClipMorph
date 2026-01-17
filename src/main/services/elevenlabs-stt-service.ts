@@ -299,22 +299,26 @@ class ElevenLabsSttService {
             return
           }
           
-          // Also check if current transcript starts with or contains the last executed one
-          // This prevents re-executing when user adds more words to same command
+          // Check if this is a continuation of the last command
+          // If so, only execute if there's substantial new content
+          let textToExecute = transcript
           if (this.lastExecutedTranscript && transcript.startsWith(this.lastExecutedTranscript)) {
-            // User is continuing from the last executed command - only execute new part
             const newPart = transcript.slice(this.lastExecutedTranscript.length).trim()
-            if (newPart.length < 10) {
-              console.log(`[ElevenLabs-STT] New addition too short: "${newPart}"`)
+            if (newPart.length < 15) {
+              console.log(`[ElevenLabs-STT] New addition too short to execute: "${newPart}"`)
               return
             }
+            // Execute the FULL new transcript (includes context from previous)
+            // This way the LLM gets the full context
+            textToExecute = transcript
+            console.log(`[ElevenLabs-STT] Continuation detected, new part: "${newPart.substring(0, 50)}..."`)
           }
           
           console.log(`[ElevenLabs-STT] Silence timeout (${SILENCE_TIMEOUT_MS}ms), auto-executing!`)
           this.hasExecuted = true
           this.lastExecutedTranscript = transcript
           try {
-            await this.executeCallback?.(transcript, 'silence')
+            await this.executeCallback?.(textToExecute, 'silence')
           } catch (error) {
             console.error('[ElevenLabs-STT] Execute callback error:', error)
           }
@@ -385,16 +389,16 @@ class ElevenLabsSttService {
   }
 
   /**
-   * Clear transcripts and reset state (but keep execution guards)
+   * Clear transcripts and reset state for next command
    * This is called after each command execution to prepare for the next one
    */
   clearTranscripts(): void {
     this.currentTranscript = ''
     this.committedTranscripts = []
     this.lastTranscriptText = ''
-    // NOTE: Don't reset hasExecuted or lastExecutedTranscript here!
-    // These protect against re-execution when ElevenLabs keeps sending old partials.
-    // They only get reset in startListening() for a truly fresh session.
+    // Reset execution guards - allow next command to execute
+    // The lastExecutedTranscript check in startSilenceTimer prevents duplicates
+    this.hasExecuted = false
     this.resetSilenceTimer()
   }
 

@@ -126,31 +126,19 @@ function App(): JSX.Element {
       if (event.type === EventTypes.STATUS_CHANGED && event.payload) {
         const payload = event.payload as StatusChangedPayload
         setStatus(payload.status)
-        // Show status-based messages (like the working version)
-        // But DON'T overwrite 'done' or 'executing' states - let them persist
-        setVoiceState((currentState) => {
-          if (payload.status === 'idle') {
-            setTimeout(() => setLiveTranscript(null), 2000) // Keep visible briefly
-            return 'idle'
-          }
-          if (payload.status === 'listening') {
-            // Don't overwrite done/executing states - they're more important
-            if (currentState === 'done' || currentState === 'executing') {
-              return currentState
-            }
-            setLiveTranscript('🎤 Listening...')
-            return 'listening'
-          }
-          if (payload.status === 'processing') {
-            // Don't overwrite done state
-            if (currentState === 'done') {
-              return currentState
-            }
-            setLiveTranscript('⏳ Processing...')
-            return 'executing'
-          }
-          return currentState
-        })
+        // Clear state when going back to idle
+        if (payload.status === 'idle') {
+          setVoiceState('idle')
+          setTimeout(() => setLiveTranscript(null), 2000) // Keep visible briefly
+        }
+        // Reset to listening state when recording starts
+        if (payload.status === 'listening') {
+          setVoiceState('listening')
+          setLiveTranscript(null)
+        }
+        if (payload.status === 'processing') {
+          setVoiceState('executing')
+        }
       }
       if (event.type === EventTypes.PERMISSION_CHANGED && event.payload) {
         const payload = event.payload as PermissionChangedPayload
@@ -166,28 +154,23 @@ function App(): JSX.Element {
         const payload = event.payload as VoiceTranscriptPayload
         console.log('[Renderer] Transcript:', payload.text, { isFinal: payload.isFinal, isExecuting: payload.isExecuting, isDone: payload.isDone })
         
-        // Update transcript text - let STATUS_CHANGED handle the state transitions
         if (payload.isExecuting) {
-          // Show what command is being executed
-          console.log('[Renderer] Setting voiceState=executing')
+          // Command is being executed
           setVoiceState('executing')
-          setLiveTranscript(`⏳ "${payload.text.slice(0, 40)}${payload.text.length > 40 ? '...' : ''}"`)
+          setLiveTranscript(payload.text)
         } else if (payload.isDone) {
           // Command finished
-          console.log('[Renderer] Setting voiceState=done - READY TO PASTE!')
           setVoiceState('done')
-          setLiveTranscript('✓ Done - Paste now!')
-          // Auto-clear done state after 3s to go back to listening
-          setTimeout(() => {
-            setVoiceState((current) => current === 'done' ? 'listening' : current)
-            setLiveTranscript((current) => current === '✓ Done - Paste now!' ? '🎤 Listening...' : current)
-          }, 3000)
-        } else if (payload.text && payload.text.trim()) {
-          // Live transcript while speaking
+          setLiveTranscript(payload.text)
+        } else if (payload.text === '') {
+          // Back to listening
+          setVoiceState('listening')
+          setLiveTranscript(null)
+        } else {
+          // Live transcript
           setVoiceState('transcribing')
-          setLiveTranscript(`"${payload.text}"`)
+          setLiveTranscript(payload.text)
         }
-        // Note: don't clear transcript on empty text - let STATUS_CHANGED handle that
       }
       if (event.type === EventTypes.OPENCODE_OUTPUT && event.payload) {
         const payload = event.payload as OpenCodeOutputPayload
@@ -453,8 +436,7 @@ function App(): JSX.Element {
     }
   }
 
-  // isRecording is true when actively capturing voice OR processing a voice command
-  // This keeps the voice UI visible during the entire voice interaction
+  // isRecording should be true during both listening AND processing (executing)
   const isRecording = status === 'listening' || status === 'processing'
 
   const getMicPermissionText = (): string => {
@@ -642,18 +624,41 @@ function App(): JSX.Element {
       return (
         <div className="app compact recording">
           <div className="compact-recording-bar">
-            {/* Left side: Waveform animation */}
+            {/* Left side: Status indicator */}
             <div className="recording-left">
-              <div className="recording-dot-small" />
-              <div className="compact-waveform-large">
-                <span className="wave-bar" />
-                <span className="wave-bar" />
-                <span className="wave-bar" />
-                <span className="wave-bar" />
-                <span className="wave-bar" />
-                <span className="wave-bar" />
-                <span className="wave-bar" />
-              </div>
+              {voiceState === 'executing' ? (
+                <>
+                  <Sparkles size={14} className="spinning" style={{ color: '#fbbf24' }} />
+                  <span style={{ fontSize: '12px', color: '#fbbf24', marginLeft: '6px' }}>
+                    Executing{liveTranscript ? `: ${liveTranscript.slice(0, 25)}...` : '...'}
+                  </span>
+                </>
+              ) : voiceState === 'done' ? (
+                <>
+                  <Check size={14} style={{ color: '#22c55e' }} />
+                  <span style={{ fontSize: '12px', color: '#22c55e', marginLeft: '6px' }}>
+                    Done! Ready to paste
+                  </span>
+                </>
+              ) : (
+                <>
+                  <div className="recording-dot-small" />
+                  <div className="compact-waveform-large">
+                    <span className="wave-bar" />
+                    <span className="wave-bar" />
+                    <span className="wave-bar" />
+                    <span className="wave-bar" />
+                    <span className="wave-bar" />
+                    <span className="wave-bar" />
+                    <span className="wave-bar" />
+                  </div>
+                  {liveTranscript && (
+                    <span style={{ fontSize: '11px', color: '#93c5fd', marginLeft: '8px', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {liveTranscript.length > 30 ? '...' + liveTranscript.slice(-30) : liveTranscript}
+                    </span>
+                  )}
+                </>
+              )}
             </div>
 
             {/* Right side: Action buttons */}
@@ -749,24 +754,28 @@ function App(): JSX.Element {
           
           {/* Show voice/transform state or clipboard preview */}
           {isRecording ? (
-            // Voice recording/processing active - show liveTranscript directly
+            // Voice recording active - show state-appropriate UI
             <div className="compact-voice-area">
-              {liveTranscript ? (
-                <span className={`compact-voice-status ${voiceState}`} title={liveTranscript}>
-                  {voiceState === 'executing' && <Sparkles size={12} className="spinning" />}
-                  {voiceState === 'done' && <Check size={12} />}
-                  {voiceState === 'transcribing' && <Mic size={12} className="mic-active" />}
-                  {voiceState === 'listening' && (
-                    <div className="mini-waveform">
-                      <span className="mini-wave" />
-                      <span className="mini-wave" />
-                      <span className="mini-wave" />
-                    </div>
-                  )}
-                  <span>{liveTranscript.length > 45 ? liveTranscript.slice(0, 45) + '...' : liveTranscript}</span>
+              {voiceState === 'executing' || transformStatus === 'processing' ? (
+                // Currently executing a command
+                <span className="compact-voice-status executing">
+                  <Sparkles size={12} className="spinning" />
+                  <span>Executing{liveTranscript ? `: ${liveTranscript.slice(0, 30)}${liveTranscript.length > 30 ? '...' : ''}` : '...'}</span>
+                </span>
+              ) : voiceState === 'done' ? (
+                // Command finished successfully
+                <span className="compact-voice-status done">
+                  <Check size={12} />
+                  <span>Done! Ready for next...</span>
+                </span>
+              ) : voiceState === 'transcribing' && liveTranscript ? (
+                // Show live transcript
+                <span className="compact-voice-transcript" title={liveTranscript}>
+                  <Mic size={12} className="mic-active" />
+                  <span>{liveTranscript.length > 40 ? '...' + liveTranscript.slice(-40) : liveTranscript}</span>
                 </span>
               ) : (
-                // Fallback when no transcript yet
+                // Just listening, no words yet
                 <span className="compact-voice-status listening">
                   <div className="mini-waveform">
                     <span className="mini-wave" />

@@ -7263,18 +7263,21 @@ class ElevenLabsSttService {
             console.log(`[ElevenLabs-STT] Ignoring duplicate transcript: "${transcript.substring(0, 50)}..."`);
             return;
           }
+          let textToExecute = transcript;
           if (this.lastExecutedTranscript && transcript.startsWith(this.lastExecutedTranscript)) {
             const newPart = transcript.slice(this.lastExecutedTranscript.length).trim();
-            if (newPart.length < 10) {
-              console.log(`[ElevenLabs-STT] New addition too short: "${newPart}"`);
+            if (newPart.length < 15) {
+              console.log(`[ElevenLabs-STT] New addition too short to execute: "${newPart}"`);
               return;
             }
+            textToExecute = transcript;
+            console.log(`[ElevenLabs-STT] Continuation detected, new part: "${newPart.substring(0, 50)}..."`);
           }
           console.log(`[ElevenLabs-STT] Silence timeout (${SILENCE_TIMEOUT_MS}ms), auto-executing!`);
           this.hasExecuted = true;
           this.lastExecutedTranscript = transcript;
           try {
-            await this.executeCallback?.(transcript, "silence");
+            await this.executeCallback?.(textToExecute, "silence");
           } catch (error) {
             console.error("[ElevenLabs-STT] Execute callback error:", error);
           }
@@ -7336,13 +7339,14 @@ class ElevenLabsSttService {
     return committed;
   }
   /**
-   * Clear transcripts and reset state (but keep execution guards)
+   * Clear transcripts and reset state for next command
    * This is called after each command execution to prepare for the next one
    */
   clearTranscripts() {
     this.currentTranscript = "";
     this.committedTranscripts = [];
     this.lastTranscriptText = "";
+    this.hasExecuted = false;
     this.resetSilenceTimer();
   }
   /**
@@ -7554,10 +7558,6 @@ class VoiceService {
   // Transcript history (in-memory, persisted to SQLite)
   transcripts = [];
   lastTranscript = null;
-  // Flag to suppress partial transcripts during command execution
-  isExecutingCommand = false;
-  // Track when we last showed "Done" to prevent immediate overwrites
-  doneShownAt = 0;
   /**
    * Set the event emitter for sending events to the renderer
    */
@@ -7576,8 +7576,6 @@ class VoiceService {
   emit(event) {
     if (this.eventEmitter) {
       this.eventEmitter(event);
-    } else {
-      console.warn("[VoiceService] eventEmitter not set, event dropped:", event.type);
     }
   }
   /**
@@ -7804,28 +7802,8 @@ class VoiceService {
    * Set up ElevenLabs streaming with live transcript updates and auto-execute
    */
   async setupElevenLabsStreaming() {
-    let lastExecutedText = "";
     elevenLabsSttService.onTranscript((result) => {
       this.captureState.pendingTranscript = result.text;
-      if (this.isExecutingCommand && !result.isFinal) {
-        const isNewSpeech = lastExecutedText && !result.text.startsWith(lastExecutedText) && !lastExecutedText.startsWith(result.text);
-        if (isNewSpeech) {
-          console.log(`[VoiceService] New speech detected during execution hold, allowing: "${result.text.slice(0, 30)}..."`);
-          this.isExecutingCommand = false;
-          this.doneShownAt = 0;
-          lastExecutedText = "";
-        } else {
-          return;
-        }
-      }
-      const timeSinceDone = Date.now() - this.doneShownAt;
-      if (this.doneShownAt > 0 && timeSinceDone < 2e3 && !result.isFinal) {
-        return;
-      }
-      if (this.doneShownAt > 0 && timeSinceDone >= 2e3) {
-        this.doneShownAt = 0;
-        lastExecutedText = "";
-      }
       console.log(`[VoiceService] ElevenLabs transcript: "${result.text}" (final: ${result.isFinal})`);
       this.emit(
         createEvent(EventTypes.VOICE_TRANSCRIPT, {
@@ -7836,10 +7814,7 @@ class VoiceService {
     });
     elevenLabsSttService.onExecute(async (transcript, reason) => {
       console.log(`[VoiceService] Auto-execute triggered by ${reason}: "${transcript}"`);
-      this.isExecutingCommand = true;
-      lastExecutedText = transcript;
       this.setAppStatus("processing");
-      console.log(`[VoiceService] === EXECUTING: "${transcript.slice(0, 50)}..." ===`);
       this.emit(
         createEvent(EventTypes.VOICE_TRANSCRIPT, {
           text: transcript,
@@ -7853,8 +7828,6 @@ class VoiceService {
       this.storeTranscript(transcript, startTime, duration);
       const routingResult = await intentService.routeTranscript(transcript);
       console.log(`[VoiceService] Auto-execute intent result:`, routingResult);
-      console.log(`[VoiceService] === DONE! Emitting isDone=true - USER CAN PASTE NOW ===`);
-      this.doneShownAt = Date.now();
       this.emit(
         createEvent(EventTypes.VOICE_TRANSCRIPT, {
           text: "✓ Done! Ready for next command...",
@@ -7865,8 +7838,15 @@ class VoiceService {
       );
       elevenLabsSttService.clearTranscripts();
       setTimeout(() => {
-        console.log(`[VoiceService] 1.5s timeout - resetting isExecutingCommand to false, keeping done state`);
-        this.isExecutingCommand = false;
+        if (this.captureState.isCapturing) {
+          this.setAppStatus("listening");
+          this.emit(
+            createEvent(EventTypes.VOICE_TRANSCRIPT, {
+              text: "",
+              isFinal: false
+            })
+          );
+        }
       }, 1500);
     });
     const noiseSuppression = await storeService.getSetting("voice.noiseSuppression");
@@ -7888,8 +7868,6 @@ class VoiceService {
       this.captureState.recording.stop();
     }
     this.captureState.isCapturing = false;
-    this.isExecutingCommand = false;
-    this.doneShownAt = 0;
     this.emit(createEvent(EventTypes.VOICE_STOPPED));
     console.log(`[VoiceService] Audio capture stopped (duration: ${duration}ms)`);
     if (duration < 300) {
@@ -8092,41 +8070,33 @@ class VoiceService {
   async listInputDevices() {
     return new Promise((resolve) => {
       const { exec } = require("child_process");
-      exec("system_profiler SPAudioDataType", (error, stdout) => {
+      exec("system_profiler SPAudioDataType -json", (error, stdout) => {
         if (error) {
-          console.error("[VoiceService] Failed to run system_profiler:", error.message);
+          console.error("[VoiceService] Failed to list audio devices:", error);
           resolve([]);
           return;
         }
-        const devices = [];
-        const lines = stdout.split("\n");
-        let currentDevice = "";
-        let hasInput = false;
-        for (let i = 0; i < lines.length; i++) {
-          const line = lines[i];
-          const deviceMatch = line.match(/^\s{4,12}([^:]+):$/);
-          if (deviceMatch && !line.includes("Audio:") && !line.includes("Devices:")) {
-            if (currentDevice && hasInput) {
-              devices.push({ id: currentDevice, name: currentDevice });
+        try {
+          const data = JSON.parse(stdout);
+          const devices = [];
+          const audioData = data.SPAudioDataType || [];
+          for (const item of audioData) {
+            if (item._items) {
+              for (const device of item._items) {
+                if (device.coreaudio_input_source) {
+                  devices.push(device._name);
+                }
+              }
             }
-            currentDevice = deviceMatch[1].trim();
-            hasInput = false;
-          }
-          if (currentDevice && line.includes("Input Channels:")) {
-            const channelMatch = line.match(/Input Channels:\s*(\d+)/);
-            if (channelMatch && parseInt(channelMatch[1]) > 0) {
-              hasInput = true;
+            if (item.coreaudio_input_source) {
+              devices.push(item._name);
             }
           }
+          resolve(devices);
+        } catch (parseError) {
+          console.error("[VoiceService] Failed to parse audio devices:", parseError);
+          resolve([]);
         }
-        if (currentDevice && hasInput) {
-          devices.push({ id: currentDevice, name: currentDevice });
-        }
-        const uniqueDevices = devices.filter(
-          (device, index, self) => index === self.findIndex((d) => d.id === device.id)
-        );
-        console.log("[VoiceService] Found audio input devices:", uniqueDevices);
-        resolve(uniqueDevices);
       });
     });
   }
