@@ -3,7 +3,7 @@
  * Handles clipboard watching, snapshot gating, self-trigger immunity, and undo history
  */
 
-import { clipboard } from 'electron'
+import { clipboard, nativeImage } from 'electron'
 import {
   EventTypes,
   createEvent,
@@ -236,6 +236,69 @@ export class ClipboardService {
   }
 
   /**
+   * Read file paths from clipboard (when files are copied in Finder)
+   * Returns array of file paths, or empty array if no files
+   */
+  readFilePaths(): string[] {
+    try {
+      // On macOS, copied files are available via read('NSFilenamesPboardType')
+      // Electron's clipboard.read() can access this
+      const buffer = clipboard.readBuffer('NSFilenamesPboardType')
+      if (buffer && buffer.length > 0) {
+        // NSFilenamesPboardType is a plist, but we can also try readBookmark
+        // Actually, let's try the simpler approach: clipboard.readText() sometimes has the path
+        // But more reliably, we can check for file:// URLs
+      }
+    } catch {
+      // Not available
+    }
+
+    // Try reading as file URLs (works on macOS when files are copied)
+    try {
+      // macOS stores copied files as file:// URLs in 'public.file-url' format
+      const text = clipboard.readText()
+      
+      // Check if clipboard has file paths (macOS Finder copies paths as text sometimes)
+      if (text && (text.startsWith('/') || text.startsWith('~'))) {
+        // Could be a file path pasted as text
+        const lines = text.split('\n').filter(line => line.trim())
+        const filePaths = lines.filter(line => 
+          line.startsWith('/') || line.startsWith('~')
+        )
+        if (filePaths.length > 0) {
+          return filePaths
+        }
+      }
+    } catch {
+      // Not available
+    }
+
+    // Try reading bookmark data (another macOS format for files)
+    try {
+      // Check available formats
+      const formats = clipboard.availableFormats()
+      
+      // Look for file-related formats
+      if (formats.includes('text/uri-list')) {
+        const uriList = clipboard.read('text/uri-list')
+        if (uriList) {
+          const paths = uriList
+            .split('\n')
+            .filter(line => line.startsWith('file://'))
+            .map(uri => decodeURIComponent(uri.replace('file://', '')))
+          if (paths.length > 0) {
+            return paths
+          }
+        }
+      }
+    } catch {
+      // Not available
+    }
+
+    return []
+  }
+
+  /**
    * Write text to the clipboard (with self-trigger immunity)
    * Optionally saves to shadow history for undo
    */
@@ -383,6 +446,57 @@ export class ClipboardService {
       this.stopWatching()
       this.startWatching()
     }
+  }
+
+  /**
+   * Write an image to the clipboard
+   * Used for chart rendering and other image outputs
+   */
+  writeImage(imageBuffer: Buffer, saveToHistory = true): void {
+    // Save current content to shadow history if requested
+    if (saveToHistory && this.currentSnapshot) {
+      this.pushToShadowHistory(this.currentSnapshot)
+    }
+
+    // Create native image from buffer
+    const image = nativeImage.createFromBuffer(imageBuffer)
+    
+    if (image.isEmpty()) {
+      console.error('[ClipboardService] Failed to create image from buffer')
+      return
+    }
+
+    // Write image to clipboard
+    clipboard.writeImage(image)
+    console.log('[ClipboardService] Image written to clipboard')
+
+    // Note: We don't update currentSnapshot for images since it's text-based
+    // The next poll will detect the change anyway
+  }
+
+  /**
+   * Write an image to clipboard with snapshot gating
+   */
+  writeImageGated(
+    imageBuffer: Buffer,
+    expectedSnapshotId: string
+  ): { success: true } | { success: false; error: IpcError } {
+    if (!this.validateSnapshot(expectedSnapshotId)) {
+      return {
+        success: false,
+        error: {
+          code: ErrorCodes.CLIPBOARD_SNAPSHOT_MISMATCH,
+          message: 'Clipboard has changed since job started. Result not applied.',
+          details: {
+            expectedSnapshotId,
+            currentSnapshotId: this.currentSnapshot?.id,
+          },
+        },
+      }
+    }
+
+    this.writeImage(imageBuffer, true)
+    return { success: true }
   }
 
   /**

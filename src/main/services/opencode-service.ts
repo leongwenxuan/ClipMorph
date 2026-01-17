@@ -240,6 +240,8 @@ class OpenCodeSidecar extends EventEmitter {
 
         // Spawn PTY process for proper terminal emulation
         // This handles interactive prompts, ANSI codes, and terminal sizing
+        // Note: node-pty is a native module that may crash if not rebuilt for Electron
+        // Run: npx electron-rebuild -f -w node-pty
         this.ptyProcess = pty.spawn(this.binaryPath, [request.prompt], {
           name: 'xterm-256color',
           cols: 120,

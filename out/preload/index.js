@@ -75,7 +75,12 @@ const IpcChannels = {
   SKILL_DISCOVER: "clipmorph:skill:discover",
   SKILL_GET: "clipmorph:skill:get",
   SKILL_EXPORT: "clipmorph:skill:export",
-  SKILL_IMPORT: "clipmorph:skill:import"
+  SKILL_IMPORT: "clipmorph:skill:import",
+  // Operations history domain
+  HISTORY_GET: "clipmorph:history:get",
+  HISTORY_CLEAR: "clipmorph:history:clear",
+  HISTORY_COPY_IMAGE: "clipmorph:history:copy-image",
+  HISTORY_GET_IMAGE: "clipmorph:history:get-image"
 };
 const api = {
   getAppStatus: () => electron.ipcRenderer.invoke(IpcChannels.STATUS_GET),
@@ -152,6 +157,11 @@ const api = {
   discoverSkills: (forceReload) => electron.ipcRenderer.invoke(IpcChannels.SKILL_DISCOVER, { forceReload }),
   getSkill: (skillId) => electron.ipcRenderer.invoke(IpcChannels.SKILL_GET, { skillId }),
   exportSkill: (skillId, outputPath) => electron.ipcRenderer.invoke(IpcChannels.SKILL_EXPORT, { skillId, outputPath }),
-  importSkill: (source, global) => electron.ipcRenderer.invoke(IpcChannels.SKILL_IMPORT, { source, global })
+  importSkill: (source, global) => electron.ipcRenderer.invoke(IpcChannels.SKILL_IMPORT, { source, global }),
+  // Operations History API
+  getOperationsHistory: (limit) => electron.ipcRenderer.invoke(IpcChannels.HISTORY_GET, { limit }),
+  clearOperationsHistory: () => electron.ipcRenderer.invoke(IpcChannels.HISTORY_CLEAR),
+  copyImageToClipboard: (imagePath) => electron.ipcRenderer.invoke(IpcChannels.HISTORY_COPY_IMAGE, { imagePath }),
+  getImageBase64: (imagePath) => electron.ipcRenderer.invoke(IpcChannels.HISTORY_GET_IMAGE, { imagePath })
 };
 electron.contextBridge.exposeInMainWorld("clipmorph", api);

@@ -60,6 +60,7 @@ import {
   SkillGetResponse,
   SkillExportResponse,
   SkillImportResponse,
+  OperationHistoryResponse,
 } from '../../packages/contracts/src'
 
 // ============================================================================
@@ -518,6 +519,37 @@ export interface ClipMorphAPI {
    * @returns Promise resolving to import result
    */
   importSkill: (source: string, global?: boolean) => Promise<IpcResponse<SkillImportResponse>>
+
+  // ============================================================================
+  // Operations History API
+  // ============================================================================
+
+  /**
+   * Get operations history (last N operations with input/output)
+   * @param limit Optional limit (default 50)
+   * @returns Promise resolving to operations list
+   */
+  getOperationsHistory: (limit?: number) => Promise<IpcResponse<OperationHistoryResponse>>
+
+  /**
+   * Clear operations history
+   * @returns Promise resolving to success
+   */
+  clearOperationsHistory: () => Promise<IpcResponse<{ cleared: boolean }>>
+
+  /**
+   * Copy an image from path to clipboard
+   * @param imagePath The path to the image file
+   * @returns Promise resolving to success
+   */
+  copyImageToClipboard: (imagePath: string) => Promise<IpcResponse<{ copied: boolean }>>
+
+  /**
+   * Get an image as base64 for preview
+   * @param imagePath The path to the image file
+   * @returns Promise resolving to base64 data
+   */
+  getImageBase64: (imagePath: string) => Promise<IpcResponse<{ base64: string; mimeType: string }>>
 }
 
 // Expose a minimal, typed API to the renderer
@@ -690,6 +722,19 @@ const api: ClipMorphAPI = {
 
   importSkill: (source: string, global?: boolean) =>
     ipcRenderer.invoke(IpcChannels.SKILL_IMPORT, { source, global }),
+
+  // Operations History API
+  getOperationsHistory: (limit?: number) =>
+    ipcRenderer.invoke(IpcChannels.HISTORY_GET, { limit }),
+
+  clearOperationsHistory: () =>
+    ipcRenderer.invoke(IpcChannels.HISTORY_CLEAR),
+
+  copyImageToClipboard: (imagePath: string) =>
+    ipcRenderer.invoke(IpcChannels.HISTORY_COPY_IMAGE, { imagePath }),
+
+  getImageBase64: (imagePath: string) =>
+    ipcRenderer.invoke(IpcChannels.HISTORY_GET_IMAGE, { imagePath }),
 }
 
 // Expose the API via contextBridge (secure, isolated)

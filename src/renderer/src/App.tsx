@@ -9,7 +9,7 @@ import {
   VoiceTranscriptPayload,
 } from '../../../packages/contracts/src'
 import Settings from './components/Settings'
-import TranscriptHistory from './components/TranscriptHistory'
+import OperationsHistory from './components/OperationsHistory'
 import LastAction from './components/LastAction'
 import JobStatus from './components/JobStatus'
 import './styles/App.css'
@@ -396,9 +396,9 @@ function App(): JSX.Element {
             className="header-btn"
             onClick={() => setShowHistory(true)}
             aria-label="History"
-            title="Transcript History"
+            title="History"
           >
-            📝
+            📋
           </button>
           <button
             className="header-btn"
@@ -469,7 +469,7 @@ function App(): JSX.Element {
       </main>
 
       {showSettings && <Settings onClose={() => setShowSettings(false)} />}
-      {showHistory && <TranscriptHistory onClose={() => setShowHistory(false)} />}
+      {showHistory && <OperationsHistory onClose={() => setShowHistory(false)} />}
 
       <LastAction />
       <JobStatus />

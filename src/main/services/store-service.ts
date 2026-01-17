@@ -25,6 +25,21 @@ export interface TranscriptRow {
   created_at: number
 }
 
+export interface OperationHistoryRow {
+  id: string
+  command: string
+  job_type: string
+  input_text: string
+  input_html: string | null
+  output_text: string | null
+  output_image_size: number | null
+  output_image_path: string | null
+  success: boolean
+  error: string | null
+  duration_ms: number | null
+  created_at: number
+}
+
 // Default settings
 export const DEFAULT_SETTINGS = {
   'hotkey.pushToTalk': 'Control+Shift+Space',
@@ -40,7 +55,16 @@ export const DEFAULT_SETTINGS = {
   'ui.theme': 'system',
   'audio.minCaptureDuration': '200',
   'audio.inputDevice': '', // Empty = system default (macOS uses CoreAudio default)
+  'cerebras.model': 'qwen-3-32b', // Cerebras model for browser agent
 } as const
+
+// Available Cerebras models
+export const CEREBRAS_MODELS = [
+  { id: 'llama3.1-8b', name: 'Llama 3.1 8B', params: '8B', speed: '~2200 t/s' },
+  { id: 'llama-3.3-70b', name: 'Llama 3.3 70B', params: '70B', speed: '~2100 t/s' },
+  { id: 'gpt-oss-120b', name: 'OpenAI GPT OSS', params: '120B', speed: '~3000 t/s' },
+  { id: 'qwen-3-32b', name: 'Qwen 3 32B', params: '32B', speed: '~2600 t/s' },
+] as const
 
 export type SettingKey = keyof typeof DEFAULT_SETTINGS
 
@@ -106,6 +130,36 @@ class StoreService {
     // Index for transcript ordering
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_transcripts_created_at ON transcripts(created_at DESC)
+    `)
+
+    // Operations history table (last 100 operations)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS operations_history (
+        id TEXT PRIMARY KEY,
+        command TEXT NOT NULL,
+        job_type TEXT NOT NULL,
+        input_text TEXT NOT NULL,
+        input_html TEXT,
+        output_text TEXT,
+        output_image_size INTEGER,
+        output_image_path TEXT,
+        success INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        duration_ms INTEGER,
+        created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
+      )
+    `)
+
+    // Migration: add output_image_path column if it doesn't exist
+    try {
+      this.db.exec(`ALTER TABLE operations_history ADD COLUMN output_image_path TEXT`)
+    } catch {
+      // Column already exists, ignore
+    }
+
+    // Index for operations ordering
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_operations_created_at ON operations_history(created_at DESC)
     `)
   }
 
@@ -237,6 +291,113 @@ class StoreService {
     if (!this.db) throw new Error('Database not initialized')
 
     const stmt = this.db.prepare('DELETE FROM transcripts')
+    stmt.run()
+  }
+
+  // ============================================================================
+  // Operations History
+  // ============================================================================
+
+  /**
+   * Add an operation to history (maintains last 100)
+   */
+  addOperation(operation: {
+    id: string
+    command: string
+    jobType: string
+    inputText: string
+    inputHtml?: string
+    outputText?: string
+    outputImageSize?: number
+    outputImagePath?: string
+    success: boolean
+    error?: string
+    durationMs?: number
+  }): void {
+    if (!this.db) throw new Error('Database not initialized')
+
+    const insertStmt = this.db.prepare(`
+      INSERT INTO operations_history (
+        id, command, job_type, input_text, input_html, 
+        output_text, output_image_size, output_image_path, success, error, duration_ms, created_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+    insertStmt.run(
+      operation.id,
+      operation.command,
+      operation.jobType,
+      operation.inputText,
+      operation.inputHtml ?? null,
+      operation.outputText ?? null,
+      operation.outputImageSize ?? null,
+      operation.outputImagePath ?? null,
+      operation.success ? 1 : 0,
+      operation.error ?? null,
+      operation.durationMs ?? null,
+      Date.now()
+    )
+
+    // Delete old operations (keep last 100)
+    const deleteStmt = this.db.prepare(`
+      DELETE FROM operations_history WHERE id NOT IN (
+        SELECT id FROM operations_history ORDER BY created_at DESC LIMIT 100
+      )
+    `)
+    deleteStmt.run()
+  }
+
+  /**
+   * Get operations history (newest first)
+   */
+  getOperations(limit = 50): OperationHistoryRow[] {
+    if (!this.db) throw new Error('Database not initialized')
+
+    const stmt = this.db.prepare(`
+      SELECT 
+        id, command, job_type, input_text, input_html,
+        output_text, output_image_size, output_image_path, success, error, duration_ms, created_at
+      FROM operations_history
+      ORDER BY created_at DESC
+      LIMIT ?
+    `)
+    const rows = stmt.all(limit) as Array<{
+      id: string
+      command: string
+      job_type: string
+      input_text: string
+      input_html: string | null
+      output_text: string | null
+      output_image_size: number | null
+      output_image_path: string | null
+      success: number
+      error: string | null
+      duration_ms: number | null
+      created_at: number
+    }>
+
+    // Convert success from number to boolean
+    return rows.map(row => ({
+      ...row,
+      success: row.success === 1,
+    }))
+  }
+
+  /**
+   * Get last operation
+   */
+  getLastOperation(): OperationHistoryRow | null {
+    const operations = this.getOperations(1)
+    return operations[0] ?? null
+  }
+
+  /**
+   * Clear all operations history
+   */
+  clearOperations(): void {
+    if (!this.db) throw new Error('Database not initialized')
+
+    const stmt = this.db.prepare('DELETE FROM operations_history')
     stmt.run()
   }
 

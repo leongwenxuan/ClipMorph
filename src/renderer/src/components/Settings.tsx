@@ -20,8 +20,17 @@ interface SettingsData {
   'transforms.extractLinks.enabled': string
   'transforms.redactSecrets.enabled': string
   'ui.theme': string
+  'cerebras.model': string
   [key: string]: string
 }
+
+// Available Cerebras models
+const CEREBRAS_MODELS = [
+  { id: 'llama3.1-8b', name: 'Llama 3.1 8B', params: '8B', speed: '~2200 t/s' },
+  { id: 'llama-3.3-70b', name: 'Llama 3.3 70B', params: '70B', speed: '~2100 t/s' },
+  { id: 'gpt-oss-120b', name: 'OpenAI GPT OSS', params: '120B', speed: '~3000 t/s' },
+  { id: 'qwen-3-32b', name: 'Qwen 3 32B', params: '32B', speed: '~2600 t/s' },
+]
 
 interface SettingsProps {
   onClose: () => void
@@ -47,13 +56,21 @@ function Settings({ onClose }: SettingsProps): JSX.Element {
   const [hotkeyInput, setHotkeyInput] = useState('')
   const [hotkeyError, setHotkeyError] = useState<string | null>(null)
   
-  // API Key state
+  // API Key state (OpenAI)
   const [hasApiKey, setHasApiKey] = useState(false)
   const [maskedApiKey, setMaskedApiKey] = useState<string | null>(null)
   const [editingApiKey, setEditingApiKey] = useState(false)
   const [apiKeyInput, setApiKeyInput] = useState('')
   const [apiKeyError, setApiKeyError] = useState<string | null>(null)
   const [apiKeySaving, setApiKeySaving] = useState(false)
+  
+  // Cerebras API Key state
+  const [hasCerebrasKey, setHasCerebrasKey] = useState(false)
+  const [maskedCerebrasKey, setMaskedCerebrasKey] = useState<string | null>(null)
+  const [editingCerebrasKey, setEditingCerebrasKey] = useState(false)
+  const [cerebrasKeyInput, setCerebrasKeyInput] = useState('')
+  const [cerebrasKeyError, setCerebrasKeyError] = useState<string | null>(null)
+  const [cerebrasKeySaving, setCerebrasKeySaving] = useState(false)
 
   useEffect(() => {
     const fetchSettings = async (): Promise<void> => {
@@ -68,6 +85,13 @@ function Settings({ onClose }: SettingsProps): JSX.Element {
         if (isIpcSuccess(secretResponse)) {
           setHasApiKey(secretResponse.data.hasValue)
           setMaskedApiKey(secretResponse.data.maskedValue || null)
+        }
+        
+        // Fetch Cerebras API key status
+        const cerebrasResponse = await window.clipmorph.getSecret('cerebras-api-key')
+        if (isIpcSuccess(cerebrasResponse)) {
+          setHasCerebrasKey(cerebrasResponse.data.hasValue)
+          setMaskedCerebrasKey(cerebrasResponse.data.maskedValue || null)
         }
       } catch (err) {
         console.error('Failed to fetch settings:', err)
@@ -270,6 +294,80 @@ function Settings({ onClose }: SettingsProps): JSX.Element {
     }
   }
 
+  // Cerebras API Key handlers
+  const handleEditCerebrasKey = (): void => {
+    setEditingCerebrasKey(true)
+    setCerebrasKeyInput('')
+    setCerebrasKeyError(null)
+  }
+
+  const handleCancelCerebrasKey = (): void => {
+    setEditingCerebrasKey(false)
+    setCerebrasKeyInput('')
+    setCerebrasKeyError(null)
+  }
+
+  const handleSaveCerebrasKey = async (): Promise<void> => {
+    const trimmedKey = cerebrasKeyInput.trim()
+    if (!trimmedKey) {
+      setCerebrasKeyError('API key cannot be empty')
+      return
+    }
+
+    // Basic validation for Cerebras key format
+    if (!trimmedKey.startsWith('csk-')) {
+      setCerebrasKeyError('Cerebras API key should start with "csk-"')
+      return
+    }
+
+    setCerebrasKeySaving(true)
+    setCerebrasKeyError(null)
+
+    try {
+      const response = await window.clipmorph.setSecret('cerebras-api-key', trimmedKey)
+      if (isIpcSuccess(response)) {
+        if (response.data.success) {
+          // Refresh the masked key display
+          const secretResponse = await window.clipmorph.getSecret('cerebras-api-key')
+          if (isIpcSuccess(secretResponse)) {
+            setHasCerebrasKey(secretResponse.data.hasValue)
+            setMaskedCerebrasKey(secretResponse.data.maskedValue || null)
+          }
+          setEditingCerebrasKey(false)
+          setCerebrasKeyInput('')
+        } else {
+          setCerebrasKeyError('Failed to save API key')
+        }
+      } else {
+        setCerebrasKeyError(response.error.message)
+      }
+    } catch (err) {
+      setCerebrasKeyError('Failed to save API key')
+      console.error('Failed to save Cerebras API key:', err)
+    } finally {
+      setCerebrasKeySaving(false)
+    }
+  }
+
+  const handleDeleteCerebrasKey = async (): Promise<void> => {
+    if (!confirm('Are you sure you want to delete your Cerebras API key?')) {
+      return
+    }
+
+    setCerebrasKeySaving(true)
+    try {
+      const response = await window.clipmorph.deleteSecret('cerebras-api-key')
+      if (isIpcSuccess(response)) {
+        setHasCerebrasKey(false)
+        setMaskedCerebrasKey(null)
+      }
+    } catch (err) {
+      console.error('Failed to delete Cerebras API key:', err)
+    } finally {
+      setCerebrasKeySaving(false)
+    }
+  }
+
   if (loading) {
     return (
       <div className="settings-overlay">
@@ -305,10 +403,71 @@ function Settings({ onClose }: SettingsProps): JSX.Element {
 
         <div className="settings-content">
           <section className="settings-section">
-            <h3>API Key</h3>
-            <p className="settings-hint">Required for voice transcription (stored securely in Keychain)</p>
+            <h3>API Keys</h3>
+            <p className="settings-hint">Stored securely in macOS Keychain</p>
+            
+            {/* Cerebras API Key (preferred for browser agent) */}
             <div className="setting-row api-key-row">
-              <label>OpenAI API Key</label>
+              <label>Cerebras API Key <span className="key-hint">(Browser Agent - faster)</span></label>
+              {editingCerebrasKey ? (
+                <div className="api-key-editor">
+                  <input
+                    type="password"
+                    className="api-key-input"
+                    value={cerebrasKeyInput}
+                    onChange={(e) => setCerebrasKeyInput(e.target.value)}
+                    placeholder="csk-..."
+                    autoFocus
+                  />
+                  <div className="api-key-actions">
+                    <button
+                      className="api-key-save-btn"
+                      onClick={handleSaveCerebrasKey}
+                      disabled={cerebrasKeySaving || !cerebrasKeyInput}
+                    >
+                      {cerebrasKeySaving ? 'Saving...' : 'Save'}
+                    </button>
+                    <button
+                      className="api-key-cancel-btn"
+                      onClick={handleCancelCerebrasKey}
+                      disabled={cerebrasKeySaving}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="api-key-display">
+                  {hasCerebrasKey ? (
+                    <>
+                      <span className="api-key-masked">{maskedCerebrasKey}</span>
+                      <button className="api-key-edit-btn" onClick={handleEditCerebrasKey}>
+                        Change
+                      </button>
+                      <button 
+                        className="api-key-delete-btn" 
+                        onClick={handleDeleteCerebrasKey}
+                        disabled={cerebrasKeySaving}
+                      >
+                        Delete
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <span className="api-key-missing">Not configured</span>
+                      <button className="api-key-add-btn" onClick={handleEditCerebrasKey}>
+                        Add Key
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+            {cerebrasKeyError && <div className="api-key-error">{cerebrasKeyError}</div>}
+            
+            {/* OpenAI API Key */}
+            <div className="setting-row api-key-row">
+              <label>OpenAI API Key <span className="key-hint">(Voice & Fallback)</span></label>
               {editingApiKey ? (
                 <div className="api-key-editor">
                   <input
@@ -364,6 +523,29 @@ function Settings({ onClose }: SettingsProps): JSX.Element {
               )}
             </div>
             {apiKeyError && <div className="api-key-error">{apiKeyError}</div>}
+          </section>
+
+          <section className="settings-section">
+            <h3>Browser Agent Model</h3>
+            <p className="settings-hint">Cerebras model for browser automation (requires Cerebras API key)</p>
+            <div className="setting-row model-row">
+              <label>Model</label>
+              <select
+                className="model-select"
+                value={settings['cerebras.model'] || 'qwen-3-32b'}
+                onChange={async (e) => {
+                  const newModel = e.target.value
+                  setSettings((prev) => prev ? { ...prev, 'cerebras.model': newModel } : null)
+                  await window.clipmorph.setSetting('cerebras.model', newModel)
+                }}
+              >
+                {CEREBRAS_MODELS.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.name} ({model.params}) - {model.speed}
+                  </option>
+                ))}
+              </select>
+            </div>
           </section>
 
           <section className="settings-section">

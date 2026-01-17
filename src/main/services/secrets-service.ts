@@ -12,7 +12,7 @@ import keytar from 'keytar'
 const SERVICE_NAME = 'ClipMorph'
 
 // Known secret keys
-export type SecretKey = 'openai-api-key' | 'anthropic-api-key'
+export type SecretKey = 'openai-api-key' | 'anthropic-api-key' | 'cerebras-api-key'
 
 class SecretsService {
   /**
@@ -69,6 +69,27 @@ class SecretsService {
    */
   async hasOpenAIKey(): Promise<boolean> {
     return this.hasSecret('openai-api-key')
+  }
+
+  /**
+   * Get Cerebras API key specifically
+   */
+  async getCerebrasKey(): Promise<string | null> {
+    return this.getSecret('cerebras-api-key')
+  }
+
+  /**
+   * Set Cerebras API key specifically
+   */
+  async setCerebrasKey(apiKey: string): Promise<void> {
+    return this.setSecret('cerebras-api-key', apiKey)
+  }
+
+  /**
+   * Check if Cerebras API key is configured
+   */
+  async hasCerebrasKey(): Promise<boolean> {
+    return this.hasSecret('cerebras-api-key')
   }
 }
 

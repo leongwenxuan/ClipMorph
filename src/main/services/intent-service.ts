@@ -32,12 +32,18 @@ import { WorkflowStage } from '../../../packages/contracts/src'
 import { jobManager } from './job-manager'
 import { clipboardService } from './clipboard-service'
 import { llmTransformService } from './llm-transform-service'
-import { automationService } from './automation-service'
+import { browserAgentService } from './browser-agent-service'
 import { getOpenCodeService } from './opencode-service'
 import { subagentService } from './subagent-service'
 import { workflowService } from './workflow-service'
 import { fileOperationService } from './file-operation-service'
 import { skillService } from './skill-service'
+import { documentExtractorService } from './document-extractor-service'
+import { chartRendererService } from './chart-renderer-service'
+import { storeService } from './store-service'
+import { app } from 'electron'
+import { writeFileSync, mkdirSync, existsSync } from 'fs'
+import { join } from 'path'
 
 // Intent routing result
 export interface IntentRoutingResult {
@@ -51,6 +57,7 @@ export interface IntentRoutingResult {
 class IntentService {
   private eventEmitter: ((event: ClipMorphEvent) => void) | null = null
   private lastAction: LastActionSummary | null = null
+  private chartImagesDir: string | null = null
 
   /**
    * Set the event emitter for sending events to the renderer
@@ -60,12 +67,112 @@ class IntentService {
   }
 
   /**
+   * Get the directory for storing chart images
+   */
+  private getChartImagesDir(): string {
+    if (!this.chartImagesDir) {
+      this.chartImagesDir = join(app.getPath('userData'), 'chart-images')
+      if (!existsSync(this.chartImagesDir)) {
+        mkdirSync(this.chartImagesDir, { recursive: true })
+      }
+    }
+    return this.chartImagesDir
+  }
+
+  /**
+   * Save a chart image and return the path
+   */
+  private saveChartImage(imageBuffer: Buffer, jobId: string): string {
+    const dir = this.getChartImagesDir()
+    const filename = `chart-${jobId}.png`
+    const filepath = join(dir, filename)
+    writeFileSync(filepath, imageBuffer)
+    return filepath
+  }
+
+  /**
    * Emit an event to the renderer
    */
   private emit<T>(event: ClipMorphEvent<T>): void {
     if (this.eventEmitter) {
       this.eventEmitter(event)
     }
+  }
+
+  /**
+   * Check if a transcript is a browser automation task
+   */
+  private isBrowserTask(transcript: string): boolean {
+    const normalized = transcript.toLowerCase()
+
+    // Browser action keywords
+    const browserKeywords = [
+      'click',
+      'fill out',
+      'fill in',
+      'fill the',
+      'submit',
+      'go to',
+      'navigate to',
+      'open',
+      'browse to',
+      'visit',
+      'scroll',
+      'download',
+      'upload',
+      'sign up',
+      'sign in',
+      'log in',
+      'login',
+      'register',
+      'book',
+      'reserve',
+      'add to cart',
+      'checkout',
+      'buy',
+      'purchase',
+      'search for',
+      'find the',
+      'select',
+      'choose',
+      'pick',
+    ]
+
+    // Check for browser keywords
+    for (const keyword of browserKeywords) {
+      if (normalized.includes(keyword)) {
+        return true
+      }
+    }
+
+    // Check for URL patterns
+    if (/https?:\/\/|www\.|\.com|\.org|\.io|\.net/.test(normalized)) {
+      return true
+    }
+
+    // Check for form-related phrases
+    const formPhrases = [
+      'form',
+      'application',
+      'apply',
+      'this page',
+      'this site',
+      'this website',
+      'on the page',
+      'on this page',
+      'the button',
+      'the link',
+      'the field',
+      'the input',
+    ]
+
+    for (const phrase of formPhrases) {
+      if (normalized.includes(phrase)) {
+        return true
+      }
+    }
+
+    return false
   }
 
   /**
@@ -106,9 +213,9 @@ class IntentService {
       return this.handleSpecialIntent(classification)
     }
 
-    // Handle automation intents
-    if (isAutomationIntent(intent)) {
-      return this.handleAutomationIntent(classification)
+    // Handle automation/browser intents
+    if (isAutomationIntent(intent) || this.isBrowserTask(transcript)) {
+      return this.handleBrowserIntent(classification)
     }
 
     // Handle code intents (OpenCode)
@@ -142,6 +249,7 @@ class IntentService {
   /**
    * Handle LLM-powered transforms
    * Routes any command through the LLM to transform clipboard content
+   * Also handles chart generation requests
    */
   private async handleLLMTransform(
     classification: IntentClassification
@@ -149,20 +257,24 @@ class IntentService {
     const { intent } = classification
     const command = classification.rawTranscript
 
+    // Check if this is a chart request
+    const isChartRequest = chartRendererService.isChartRequest(command)
+    const jobType = isChartRequest ? 'chart-render' : 'llm-transform'
+
     // Create a transform job
-    const job = jobManager.createJob('llm-transform', {
+    const job = jobManager.createJob(jobType, {
       command,
       intent,
     })
 
-    console.log(`[IntentService] Created LLM transform job ${job.id} for command: "${command}"`)
+    console.log(`[IntentService] Created ${jobType} job ${job.id} for command: "${command}"`)
 
     // Check if LLM service is available
     const isAvailable = await llmTransformService.isAvailable()
     if (!isAvailable) {
       const error = 'OpenAI API key not configured. Set it in Settings.'
       jobManager.failJob(job.id, { code: 'TRANSFORM_NOT_AVAILABLE', message: error })
-      this.updateLastAction(command, 'llm-transform', false, job.id, error)
+      this.updateLastAction(command, jobType, false, job.id, error)
       return {
         intent,
         classification,
@@ -182,7 +294,7 @@ class IntentService {
     if (!clipboardText || !snapshot) {
       const error = 'Clipboard is empty'
       jobManager.failJob(job.id, { code: 'TRANSFORM_INVALID_INPUT', message: error })
-      this.updateLastAction(command, 'llm-transform', false, job.id, error)
+      this.updateLastAction(command, jobType, false, job.id, error)
       return {
         intent,
         classification,
@@ -192,12 +304,33 @@ class IntentService {
       }
     }
 
-    // Execute LLM transform
-    const result = await llmTransformService.transform(command, clipboardText)
+    // Route to chart renderer or LLM transform
+    if (isChartRequest) {
+      return this.handleChartRequest(command, clipboardText, snapshot, job.id, intent, classification)
+    }
+
+    // Track start time for duration
+    const startTime = Date.now()
+
+    // Execute LLM transform - pass HTML for rich content like Excel tables
+    const result = await llmTransformService.transform(command, clipboardText, snapshot.html)
 
     if (!result.success) {
       jobManager.failJob(job.id, { code: 'TRANSFORM_EXECUTION_FAILED', message: result.error || 'Transform failed' })
       this.updateLastAction(command, 'llm-transform', false, job.id, result.error)
+      
+      // Log failed operation
+      storeService.addOperation({
+        id: job.id,
+        command,
+        jobType: 'llm-transform',
+        inputText: clipboardText,
+        inputHtml: snapshot.html,
+        success: false,
+        error: result.error,
+        durationMs: Date.now() - startTime,
+      })
+      
       return {
         intent,
         classification,
@@ -216,6 +349,20 @@ class IntentService {
         message: writeResult.error.message,
       })
       this.updateLastAction(command, 'llm-transform', false, job.id, writeResult.error.message)
+      
+      // Log failed operation (clipboard write failed)
+      storeService.addOperation({
+        id: job.id,
+        command,
+        jobType: 'llm-transform',
+        inputText: clipboardText,
+        inputHtml: snapshot.html,
+        outputText: result.output,
+        success: false,
+        error: writeResult.error.message,
+        durationMs: Date.now() - startTime,
+      })
+      
       return {
         intent,
         classification,
@@ -229,6 +376,18 @@ class IntentService {
     jobManager.completeJob(job.id, { output: result.output })
     this.updateLastAction(command, 'llm-transform', true, job.id)
 
+    // Log successful operation
+    storeService.addOperation({
+      id: job.id,
+      command,
+      jobType: 'llm-transform',
+      inputText: clipboardText,
+      inputHtml: snapshot.html,
+      outputText: result.output,
+      success: true,
+      durationMs: Date.now() - startTime,
+    })
+
     console.log(`[IntentService] LLM transform completed for job ${job.id}`)
 
     return {
@@ -236,6 +395,134 @@ class IntentService {
       classification,
       handled: true,
       jobId: job.id,
+    }
+  }
+
+  /**
+   * Handle chart generation requests
+   * Renders table data to a chart image and copies to clipboard
+   */
+  private async handleChartRequest(
+    command: string,
+    clipboardText: string,
+    snapshot: { id: string; html?: string },
+    jobId: string,
+    intent: Intent,
+    classification: IntentClassification
+  ): Promise<IntentRoutingResult> {
+    console.log(`[IntentService] Processing chart request: "${command}"`)
+    const startTime = Date.now()
+
+    try {
+      // Generate and render chart
+      const chartResult = await chartRendererService.createChartFromTable(
+        command,
+        clipboardText,
+        snapshot.html
+      )
+
+      if (!chartResult.success || !chartResult.imageBuffer) {
+        const error = chartResult.error || 'Failed to generate chart'
+        jobManager.failJob(jobId, { code: 'CHART_RENDER_FAILED', message: error })
+        this.updateLastAction(command, 'chart-render', false, jobId, error)
+        
+        // Log failed operation
+        storeService.addOperation({
+          id: jobId,
+          command,
+          jobType: 'chart-render',
+          inputText: clipboardText,
+          inputHtml: snapshot.html,
+          success: false,
+          error,
+          durationMs: Date.now() - startTime,
+        })
+        
+        return {
+          intent,
+          classification,
+          handled: false,
+          jobId,
+          error,
+        }
+      }
+
+      // Save chart image to disk for history
+      const imagePath = this.saveChartImage(chartResult.imageBuffer, jobId)
+      console.log(`[IntentService] Chart image saved to ${imagePath}`)
+
+      // Write image to clipboard with snapshot gating
+      const writeResult = clipboardService.writeImageGated(chartResult.imageBuffer, snapshot.id)
+
+      if (!writeResult.success) {
+        jobManager.failJob(jobId, {
+          code: writeResult.error.code,
+          message: writeResult.error.message,
+        })
+        this.updateLastAction(command, 'chart-render', false, jobId, writeResult.error.message)
+        
+        // Log failed operation (still save image path since we saved it)
+        storeService.addOperation({
+          id: jobId,
+          command,
+          jobType: 'chart-render',
+          inputText: clipboardText,
+          inputHtml: snapshot.html,
+          outputImageSize: chartResult.imageBuffer.length,
+          outputImagePath: imagePath,
+          success: false,
+          error: writeResult.error.message,
+          durationMs: Date.now() - startTime,
+        })
+        
+        return {
+          intent,
+          classification,
+          handled: false,
+          jobId,
+          error: writeResult.error.message,
+        }
+      }
+
+      // Complete the job
+      jobManager.completeJob(jobId, { 
+        chartType: chartResult.chartConfig?.type,
+        imageSize: chartResult.imageBuffer.length,
+      })
+      this.updateLastAction(command, 'chart-render', true, jobId)
+
+      // Log successful operation with image path
+      storeService.addOperation({
+        id: jobId,
+        command,
+        jobType: 'chart-render',
+        inputText: clipboardText,
+        inputHtml: snapshot.html,
+        outputImageSize: chartResult.imageBuffer.length,
+        outputImagePath: imagePath,
+        success: true,
+        durationMs: Date.now() - startTime,
+      })
+
+      console.log(`[IntentService] Chart rendered and copied to clipboard (${chartResult.chartConfig?.type}, ${chartResult.imageBuffer.length} bytes)`)
+
+      return {
+        intent,
+        classification,
+        handled: true,
+        jobId,
+      }
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error)
+      jobManager.failJob(jobId, { code: 'CHART_RENDER_FAILED', message: errorMsg })
+      this.updateLastAction(command, 'chart-render', false, jobId, errorMsg)
+      return {
+        intent,
+        classification,
+        handled: false,
+        jobId,
+        error: errorMsg,
+      }
     }
   }
 
@@ -318,33 +605,101 @@ class IntentService {
   }
 
   /**
-   * Handle automation intents
+   * Handle automation/browser intents using the Browser Agent
    */
-  private handleAutomationIntent(classification: IntentClassification): IntentRoutingResult {
+  private async handleBrowserIntent(
+    classification: IntentClassification
+  ): Promise<IntentRoutingResult> {
     const { intent } = classification
+    const task = classification.rawTranscript
 
-    // Get clipboard content for automation context (e.g., resume text)
+    // Get clipboard content for context (e.g., resume text, URL)
     const clipboardText = clipboardService.readClipboard()
 
-    // Start automation job via the automation service
-    const job = automationService.startJob({
-      type: 'portal',
-      context: {
+    // Check for files copied to clipboard (e.g., from Finder)
+    // Then check if clipboard text is a file path to a document (PDF/DOCX)
+    let resumeText = clipboardText || undefined
+    let documentFilePath: string | undefined
+
+    // First, try to get file paths from clipboard (when files are copied in Finder)
+    const copiedFilePaths = clipboardService.readFilePaths()
+    if (copiedFilePaths.length > 0) {
+      // Look for a document file in the copied files
+      for (const filePath of copiedFilePaths) {
+        const extraction = await documentExtractorService.extractFromClipboard(filePath)
+        if (extraction.isDocument) {
+          console.log(`[IntentService] Found copied document file: ${extraction.filePath}`)
+          resumeText = extraction.text
+          documentFilePath = extraction.filePath
+          break
+        }
+      }
+    }
+
+    // If no document from copied files, check if clipboard text is a file path
+    if (!documentFilePath && clipboardText) {
+      const extraction = await documentExtractorService.extractFromClipboard(clipboardText)
+      if (extraction.isDocument) {
+        console.log(`[IntentService] Extracted ${extraction.text.length} chars from ${extraction.fileType}: ${extraction.filePath}`)
+        resumeText = extraction.text
+        documentFilePath = extraction.filePath
+      }
+    }
+
+    // Check if clipboard contains a URL to use as start URL
+    const urlMatch = clipboardText?.match(/https?:\/\/[^\s]+/)
+    const startUrl = urlMatch ? urlMatch[0] : undefined
+
+    console.log(`[IntentService] Starting browser agent for task: "${task}"`)
+    if (startUrl) {
+      console.log(`[IntentService] Using start URL from clipboard: ${startUrl}`)
+    }
+    if (documentFilePath) {
+      console.log(`[IntentService] Using document file for uploads: ${documentFilePath}`)
+    }
+
+    // Check if browser agent is available
+    const isAvailable = await browserAgentService.isAvailable()
+    if (!isAvailable) {
+      const error = 'OpenAI API key not configured. Set it in Settings.'
+      this.updateLastAction(task, 'browser-agent', false, undefined, error)
+      return {
         intent,
-        transcript: classification.rawTranscript,
-        clipboardContent: clipboardText,
-      },
-    })
+        classification,
+        handled: false,
+        error,
+      }
+    }
 
-    console.log(`[IntentService] Started automation job ${job.id} for intent ${intent}`)
+    // Run the browser agent (async, non-blocking)
+    // The agent will emit events as it progresses
+    browserAgentService
+      .runTask(task, {
+        resumeText,
+        startUrl,
+        documentFilePath,
+      })
+      .then((result) => {
+        console.log(`[IntentService] Browser agent completed:`, result)
+        this.updateLastAction(
+          task,
+          'browser-agent',
+          result.success,
+          undefined,
+          result.error || result.reason
+        )
+      })
+      .catch((error) => {
+        console.error(`[IntentService] Browser agent error:`, error)
+        this.updateLastAction(task, 'browser-agent', false, undefined, (error as Error).message)
+      })
 
-    this.updateLastAction(classification.rawTranscript, intent, true, job.id)
+    this.updateLastAction(task, 'browser-agent', true)
 
     return {
       intent,
       classification,
       handled: true,
-      jobId: job.id,
     }
   }
 

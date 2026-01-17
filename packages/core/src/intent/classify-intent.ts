@@ -144,19 +144,19 @@ const INTENT_PATTERNS: IntentPattern[] = [
     priority: 30,
   },
 
-  // Code intents (OpenCode CLI)
+  // Code intents (OpenCode CLI) - only for actual code/programming tasks
   {
     intent: 'code:generate',
     patterns: [
-      /generate\s*(a\s*)?([\w\s]*\s*)?(code|function|component|class|module)/i,
-      /create\s*(a\s*)?([\w\s]*\s*)?(code|function|component|class|module)/i,
-      /write\s*(a\s*)?([\w\s]*\s*)?(code|function|component|class|module)/i,
-      /make\s*(a\s*)?([\w\s]*\s*)?(code|function|component|class|module)/i,
-      /build\s*(a\s*)?([\w\s]*\s*)?(code|function|component|class|module)/i,
-      /generate\s/i,  // "generate" alone with more words
-      /create\s.*\s(for|to)\s/i,  // "create X for/to Y"
+      /generate\s*(a\s*)?([\w\s]*\s*)?(code|function|component|class|module|script|api|endpoint|hook|service|util)/i,
+      /create\s*(a\s*)?([\w\s]*\s*)?(function|component|class|module|script|api|endpoint|hook|service|util)/i,
+      /write\s*(a\s*)?([\w\s]*\s*)?(code|function|component|class|module|script)/i,
+      /make\s*(a\s*)?([\w\s]*\s*)?(function|component|class|module)/i,
+      /build\s*(a\s*)?([\w\s]*\s*)?(function|component|class|module|api)/i,
+      /implement\s*(a\s*)?([\w\s]*\s*)?(function|feature|component|class)/i,
+      /code\s*(a\s*)?([\w\s]*\s*)?(function|feature|component)/i,
     ],
-    keywords: ['generate', 'create function', 'write code', 'make component', 'build class', 'create a'],
+    keywords: ['create function', 'write code', 'make component', 'build class', 'generate code', 'implement function'],
     priority: 40,
   },
   {

@@ -1,5 +1,6 @@
-import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, NativeImage, screen } from 'electron'
+import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, NativeImage, screen, clipboard } from 'electron'
 import { join } from 'path'
+import { readFileSync, existsSync } from 'fs'
 import {
   IpcChannels,
   EventTypes,
@@ -102,7 +103,7 @@ function setAppStatus(newStatus: AppStatus): void {
 
 // Window size modes
 const COMPACT_SIZE = { width: 300, height: 44 }
-const EXPANDED_SIZE = { width: 500, height: 480 }
+const EXPANDED_SIZE = { width: 700, height: 600 }
 let isExpanded = false
 
 function createWindow(): void {
@@ -917,6 +918,61 @@ ipcMain.handle(IpcChannels.PERMISSION_CHECK, (_event, args: { type: PermissionTy
   ipcMain.handle(IpcChannels.SKILL_IMPORT, async (_event, args: SkillImportRequest) => {
     const result = await skillService.import(args.source, args.global)
     return createSuccessResponse(result)
+  })
+
+  // ============================================================================
+  // Operations History Handlers
+  // ============================================================================
+
+  ipcMain.handle(IpcChannels.HISTORY_GET, (_event, args?: { limit?: number }) => {
+    const operations = storeService.getOperations(args?.limit ?? 50)
+    return createSuccessResponse({ operations })
+  })
+
+  ipcMain.handle(IpcChannels.HISTORY_CLEAR, () => {
+    storeService.clearOperations()
+    return createSuccessResponse({ cleared: true })
+  })
+
+  // Copy image from path to clipboard
+  ipcMain.handle(IpcChannels.HISTORY_COPY_IMAGE, (_event, args: { imagePath: string }) => {
+    try {
+      if (!args.imagePath || !existsSync(args.imagePath)) {
+        return createErrorResponse({
+          code: ErrorCodes.INVALID_ARGS,
+          message: 'Image file not found',
+        })
+      }
+      const imageBuffer = readFileSync(args.imagePath)
+      const image = nativeImage.createFromBuffer(imageBuffer)
+      clipboard.writeImage(image)
+      return createSuccessResponse({ copied: true })
+    } catch (error) {
+      return createErrorResponse({
+        code: ErrorCodes.INTERNAL_ERROR,
+        message: error instanceof Error ? error.message : 'Failed to copy image',
+      })
+    }
+  })
+
+  // Get image as base64 for preview
+  ipcMain.handle(IpcChannels.HISTORY_GET_IMAGE, (_event, args: { imagePath: string }) => {
+    try {
+      if (!args.imagePath || !existsSync(args.imagePath)) {
+        return createErrorResponse({
+          code: ErrorCodes.INVALID_ARGS,
+          message: 'Image file not found',
+        })
+      }
+      const imageBuffer = readFileSync(args.imagePath)
+      const base64 = imageBuffer.toString('base64')
+      return createSuccessResponse({ base64, mimeType: 'image/png' })
+    } catch (error) {
+      return createErrorResponse({
+        code: ErrorCodes.INTERNAL_ERROR,
+        message: error instanceof Error ? error.message : 'Failed to read image',
+      })
+    }
   })
 }
 

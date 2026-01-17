@@ -2,17 +2,20 @@
 Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
 const electron = require("electron");
 const path = require("path");
+const fs = require("fs");
 const Database = require("better-sqlite3");
 const OpenAI = require("openai");
 const keytar = require("keytar");
-const playwright = require("playwright");
+const child_process = require("child_process");
 const events = require("events");
 const crypto = require("crypto");
-const child_process = require("child_process");
 const util = require("util");
 const pty = require("node-pty");
 const promises = require("fs/promises");
 const os = require("os");
+const pdfParse = require("pdf-parse");
+const mammoth = require("mammoth");
+const playwright = require("playwright");
 const WebSocket = require("ws");
 function _interopNamespaceDefault(e) {
   const n = Object.create(null, { [Symbol.toStringTag]: { value: "Module" } });
@@ -30,6 +33,8 @@ function _interopNamespaceDefault(e) {
   n.default = e;
   return Object.freeze(n);
 }
+const path__namespace = /* @__PURE__ */ _interopNamespaceDefault(path);
+const fs__namespace = /* @__PURE__ */ _interopNamespaceDefault(fs);
 const pty__namespace = /* @__PURE__ */ _interopNamespaceDefault(pty);
 const IpcChannels = {
   // Status domain
@@ -106,12 +111,21 @@ const IpcChannels = {
   SKILL_DISCOVER: "clipmorph:skill:discover",
   SKILL_GET: "clipmorph:skill:get",
   SKILL_EXPORT: "clipmorph:skill:export",
-  SKILL_IMPORT: "clipmorph:skill:import"
+  SKILL_IMPORT: "clipmorph:skill:import",
+  // Operations history domain
+  HISTORY_GET: "clipmorph:history:get",
+  HISTORY_CLEAR: "clipmorph:history:clear",
+  HISTORY_COPY_IMAGE: "clipmorph:history:copy-image",
+  HISTORY_GET_IMAGE: "clipmorph:history:get-image"
 };
 const ErrorCodes = {
   // General errors
   UNKNOWN_ERROR: "UNKNOWN_ERROR",
   INVALID_REQUEST: "INVALID_REQUEST",
+  HANDLER_NOT_FOUND: "HANDLER_NOT_FOUND",
+  // Clipboard errors
+  CLIPBOARD_READ_FAILED: "CLIPBOARD_READ_FAILED",
+  CLIPBOARD_WRITE_FAILED: "CLIPBOARD_WRITE_FAILED",
   CLIPBOARD_SNAPSHOT_MISMATCH: "CLIPBOARD_SNAPSHOT_MISMATCH",
   CLIPBOARD_UNDO_EMPTY: "CLIPBOARD_UNDO_EMPTY",
   // Job errors
@@ -120,9 +134,22 @@ const ErrorCodes = {
   JOB_CANCEL_FAILED: "JOB_CANCEL_FAILED",
   // Voice errors
   VOICE_NOT_AVAILABLE: "VOICE_NOT_AVAILABLE",
+  VOICE_ALREADY_LISTENING: "VOICE_ALREADY_LISTENING",
+  VOICE_TRANSCRIPTION_FAILED: "VOICE_TRANSCRIPTION_FAILED",
+  // Transform errors
+  TRANSFORM_NOT_FOUND: "TRANSFORM_NOT_FOUND",
+  TRANSFORM_INVALID_INPUT: "TRANSFORM_INVALID_INPUT",
+  TRANSFORM_EXECUTION_FAILED: "TRANSFORM_EXECUTION_FAILED",
+  // Permission errors
+  PERMISSION_DENIED: "PERMISSION_DENIED",
+  PERMISSION_NOT_GRANTED: "PERMISSION_NOT_GRANTED",
+  // Automation errors
+  AUTOMATION_NEEDS_INPUT: "AUTOMATION_NEEDS_INPUT",
+  AUTOMATION_BROWSER_ERROR: "AUTOMATION_BROWSER_ERROR",
   // OpenCode errors
   OPENCODE_NOT_INSTALLED: "OPENCODE_NOT_INSTALLED",
   OPENCODE_TASK_FAILED: "OPENCODE_TASK_FAILED",
+  OPENCODE_TASK_TIMEOUT: "OPENCODE_TASK_TIMEOUT",
   OPENCODE_BUSY: "OPENCODE_BUSY"
 };
 const EventTypes = {
@@ -613,6 +640,45 @@ class ClipboardService {
     return electron.clipboard.readText();
   }
   /**
+   * Read file paths from clipboard (when files are copied in Finder)
+   * Returns array of file paths, or empty array if no files
+   */
+  readFilePaths() {
+    try {
+      const buffer = electron.clipboard.readBuffer("NSFilenamesPboardType");
+      if (buffer && buffer.length > 0) {
+      }
+    } catch {
+    }
+    try {
+      const text = electron.clipboard.readText();
+      if (text && (text.startsWith("/") || text.startsWith("~"))) {
+        const lines = text.split("\n").filter((line) => line.trim());
+        const filePaths = lines.filter(
+          (line) => line.startsWith("/") || line.startsWith("~")
+        );
+        if (filePaths.length > 0) {
+          return filePaths;
+        }
+      }
+    } catch {
+    }
+    try {
+      const formats = electron.clipboard.availableFormats();
+      if (formats.includes("text/uri-list")) {
+        const uriList = electron.clipboard.read("text/uri-list");
+        if (uriList) {
+          const paths = uriList.split("\n").filter((line) => line.startsWith("file://")).map((uri) => decodeURIComponent(uri.replace("file://", "")));
+          if (paths.length > 0) {
+            return paths;
+          }
+        }
+      }
+    } catch {
+    }
+    return [];
+  }
+  /**
    * Write text to the clipboard (with self-trigger immunity)
    * Optionally saves to shadow history for undo
    */
@@ -733,6 +799,42 @@ class ClipboardService {
     }
   }
   /**
+   * Write an image to the clipboard
+   * Used for chart rendering and other image outputs
+   */
+  writeImage(imageBuffer, saveToHistory = true) {
+    if (saveToHistory && this.currentSnapshot) {
+      this.pushToShadowHistory(this.currentSnapshot);
+    }
+    const image = electron.nativeImage.createFromBuffer(imageBuffer);
+    if (image.isEmpty()) {
+      console.error("[ClipboardService] Failed to create image from buffer");
+      return;
+    }
+    electron.clipboard.writeImage(image);
+    console.log("[ClipboardService] Image written to clipboard");
+  }
+  /**
+   * Write an image to clipboard with snapshot gating
+   */
+  writeImageGated(imageBuffer, expectedSnapshotId) {
+    if (!this.validateSnapshot(expectedSnapshotId)) {
+      return {
+        success: false,
+        error: {
+          code: ErrorCodes.CLIPBOARD_SNAPSHOT_MISMATCH,
+          message: "Clipboard has changed since job started. Result not applied.",
+          details: {
+            expectedSnapshotId,
+            currentSnapshotId: this.currentSnapshot?.id
+          }
+        }
+      };
+    }
+    this.writeImage(imageBuffer, true);
+    return { success: true };
+  }
+  /**
    * Clear state (for testing)
    */
   clear() {
@@ -756,8 +858,10 @@ const DEFAULT_SETTINGS = {
   "transforms.redactSecrets.enabled": "true",
   "ui.theme": "system",
   "audio.minCaptureDuration": "200",
-  "audio.inputDevice": ""
+  "audio.inputDevice": "",
   // Empty = system default (macOS uses CoreAudio default)
+  "cerebras.model": "qwen-3-32b"
+  // Cerebras model for browser agent
 };
 class StoreService {
   db = null;
@@ -803,6 +907,29 @@ class StoreService {
     `);
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_transcripts_created_at ON transcripts(created_at DESC)
+    `);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS operations_history (
+        id TEXT PRIMARY KEY,
+        command TEXT NOT NULL,
+        job_type TEXT NOT NULL,
+        input_text TEXT NOT NULL,
+        input_html TEXT,
+        output_text TEXT,
+        output_image_size INTEGER,
+        output_image_path TEXT,
+        success INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        duration_ms INTEGER,
+        created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000)
+      )
+    `);
+    try {
+      this.db.exec(`ALTER TABLE operations_history ADD COLUMN output_image_path TEXT`);
+    } catch {
+    }
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_operations_created_at ON operations_history(created_at DESC)
     `);
   }
   /**
@@ -911,6 +1038,76 @@ class StoreService {
   clearTranscripts() {
     if (!this.db) throw new Error("Database not initialized");
     const stmt = this.db.prepare("DELETE FROM transcripts");
+    stmt.run();
+  }
+  // ============================================================================
+  // Operations History
+  // ============================================================================
+  /**
+   * Add an operation to history (maintains last 100)
+   */
+  addOperation(operation) {
+    if (!this.db) throw new Error("Database not initialized");
+    const insertStmt = this.db.prepare(`
+      INSERT INTO operations_history (
+        id, command, job_type, input_text, input_html, 
+        output_text, output_image_size, output_image_path, success, error, duration_ms, created_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    insertStmt.run(
+      operation.id,
+      operation.command,
+      operation.jobType,
+      operation.inputText,
+      operation.inputHtml ?? null,
+      operation.outputText ?? null,
+      operation.outputImageSize ?? null,
+      operation.outputImagePath ?? null,
+      operation.success ? 1 : 0,
+      operation.error ?? null,
+      operation.durationMs ?? null,
+      Date.now()
+    );
+    const deleteStmt = this.db.prepare(`
+      DELETE FROM operations_history WHERE id NOT IN (
+        SELECT id FROM operations_history ORDER BY created_at DESC LIMIT 100
+      )
+    `);
+    deleteStmt.run();
+  }
+  /**
+   * Get operations history (newest first)
+   */
+  getOperations(limit = 50) {
+    if (!this.db) throw new Error("Database not initialized");
+    const stmt = this.db.prepare(`
+      SELECT 
+        id, command, job_type, input_text, input_html,
+        output_text, output_image_size, output_image_path, success, error, duration_ms, created_at
+      FROM operations_history
+      ORDER BY created_at DESC
+      LIMIT ?
+    `);
+    const rows = stmt.all(limit);
+    return rows.map((row) => ({
+      ...row,
+      success: row.success === 1
+    }));
+  }
+  /**
+   * Get last operation
+   */
+  getLastOperation() {
+    const operations = this.getOperations(1);
+    return operations[0] ?? null;
+  }
+  /**
+   * Clear all operations history
+   */
+  clearOperations() {
+    if (!this.db) throw new Error("Database not initialized");
+    const stmt = this.db.prepare("DELETE FROM operations_history");
     stmt.run();
   }
   /**
@@ -1051,21 +1248,19 @@ const INTENT_PATTERNS = [
     keywords: ["apply", "fill form", "fill application", "automation"],
     priority: 30
   },
-  // Code intents (OpenCode CLI)
+  // Code intents (OpenCode CLI) - only for actual code/programming tasks
   {
     intent: "code:generate",
     patterns: [
-      /generate\s*(a\s*)?([\w\s]*\s*)?(code|function|component|class|module)/i,
-      /create\s*(a\s*)?([\w\s]*\s*)?(code|function|component|class|module)/i,
-      /write\s*(a\s*)?([\w\s]*\s*)?(code|function|component|class|module)/i,
-      /make\s*(a\s*)?([\w\s]*\s*)?(code|function|component|class|module)/i,
-      /build\s*(a\s*)?([\w\s]*\s*)?(code|function|component|class|module)/i,
-      /generate\s/i,
-      // "generate" alone with more words
-      /create\s.*\s(for|to)\s/i
-      // "create X for/to Y"
+      /generate\s*(a\s*)?([\w\s]*\s*)?(code|function|component|class|module|script|api|endpoint|hook|service|util)/i,
+      /create\s*(a\s*)?([\w\s]*\s*)?(function|component|class|module|script|api|endpoint|hook|service|util)/i,
+      /write\s*(a\s*)?([\w\s]*\s*)?(code|function|component|class|module|script)/i,
+      /make\s*(a\s*)?([\w\s]*\s*)?(function|component|class|module)/i,
+      /build\s*(a\s*)?([\w\s]*\s*)?(function|component|class|module|api)/i,
+      /implement\s*(a\s*)?([\w\s]*\s*)?(function|feature|component|class)/i,
+      /code\s*(a\s*)?([\w\s]*\s*)?(function|feature|component)/i
     ],
-    keywords: ["generate", "create function", "write code", "make component", "build class", "create a"],
+    keywords: ["create function", "write code", "make component", "build class", "generate code", "implement function"],
     priority: 40
   },
   {
@@ -1916,6 +2111,24 @@ class SecretsService {
   async hasOpenAIKey() {
     return this.hasSecret("openai-api-key");
   }
+  /**
+   * Get Cerebras API key specifically
+   */
+  async getCerebrasKey() {
+    return this.getSecret("cerebras-api-key");
+  }
+  /**
+   * Set Cerebras API key specifically
+   */
+  async setCerebrasKey(apiKey) {
+    return this.setSecret("cerebras-api-key", apiKey);
+  }
+  /**
+   * Check if Cerebras API key is configured
+   */
+  async hasCerebrasKey() {
+    return this.hasSecret("cerebras-api-key");
+  }
 }
 const secretsService = new SecretsService();
 class LLMTransformService {
@@ -1936,12 +2149,29 @@ class LLMTransformService {
     return this.client;
   }
   /**
+   * Detect if content is tabular (TSV from Excel/Sheets or HTML table)
+   */
+  isTabularContent(text, html) {
+    if (html && /<table[\s>]/i.test(html)) {
+      return true;
+    }
+    const lines = text.split("\n").filter((l) => l.trim());
+    if (lines.length >= 2) {
+      const tabCounts = lines.map((l) => (l.match(/\t/g) || []).length);
+      if (tabCounts[0] > 0 && tabCounts.every((c) => c === tabCounts[0])) {
+        return true;
+      }
+    }
+    return false;
+  }
+  /**
    * Execute an LLM-powered transform
    * 
    * @param command - What the user wants to do (e.g., "make this shorter", "translate to Spanish")
    * @param text - The clipboard content to transform
+   * @param html - Optional HTML content (for rich formats like Excel tables)
    */
-  async transform(command, text) {
+  async transform(command, text, html) {
     if (!text || text.trim().length === 0) {
       return {
         success: false,
@@ -1952,6 +2182,37 @@ class LLMTransformService {
     }
     try {
       const client = await this.getClient();
+      const isTabular = this.isTabularContent(text, html);
+      let contentToTransform = text;
+      let formatHint = "";
+      if (isTabular) {
+        if (html) {
+          contentToTransform = `[HTML Table]:
+${html}
+
+[Plain Text (tab-separated)]:
+${text}`;
+          formatHint = `
+
+IMPORTANT: The input is TABULAR DATA (copied from Excel/Sheets). You MUST output as TAB-SEPARATED VALUES (TSV):
+- Each row on its own line
+- Columns separated by TAB characters (\\t), NOT spaces or pipes
+- NO markdown table syntax (no | or --- )
+- NO extra formatting or borders
+- This ensures the result can be pasted back into Excel/Sheets correctly.
+
+Example output format:
+Header1	Header2	Header3
+Value1	Value2	Value3`;
+        } else {
+          formatHint = `
+
+IMPORTANT: The input is TAB-SEPARATED tabular data. Preserve the TSV format in your output:
+- Each row on its own line
+- Columns separated by TAB characters (\\t)
+- NO markdown table syntax`;
+        }
+      }
       const response = await client.chat.completions.create({
         model: "gpt-4o-mini",
         messages: [
@@ -1965,7 +2226,7 @@ Rules:
 - If the command is unclear, make your best interpretation
 - If the text cannot be transformed as requested (e.g., "translate" but no target language), make a reasonable assumption
 - Preserve formatting when appropriate (e.g., keep code as code)
-- For JSON/YAML operations, ensure valid output format
+- For JSON/YAML operations, ensure valid output format${formatHint}
 
 Examples:
 - "make shorter" → condense the text while keeping meaning
@@ -1982,7 +2243,7 @@ Examples:
             content: `Command: ${command}
 
 Text to transform:
-${text}`
+${contentToTransform}`
           }
         ],
         temperature: 0.3,
@@ -2023,826 +2284,595 @@ ${text}`
   }
 }
 const llmTransformService = new LLMTransformService();
-function generateSnapshotId() {
-  return `snap-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
-}
-function generateRef(index) {
-  return `e${index}`;
-}
-async function takeSnapshot(page) {
-  const snapshotId = generateSnapshotId();
-  const url = page.url();
-  const title = await page.title();
-  const elements = await page.evaluate(() => {
-    const results = [];
-    const selectors = [
-      "a",
-      "button",
-      "input",
-      "select",
-      "textarea",
-      '[role="button"]',
-      '[role="link"]',
-      '[role="textbox"]',
-      '[role="combobox"]',
-      '[role="checkbox"]',
-      '[role="radio"]',
-      '[role="menuitem"]',
-      '[role="tab"]',
-      "[onclick]",
-      "[tabindex]"
-    ];
-    const allElements = document.querySelectorAll(selectors.join(","));
-    allElements.forEach((el) => {
-      const htmlEl = el;
-      const rect = htmlEl.getBoundingClientRect();
-      const style = window.getComputedStyle(htmlEl);
-      const isVisible = style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0" && rect.width > 0 && rect.height > 0;
-      if (!isVisible) return;
-      let role = htmlEl.getAttribute("role") || "";
-      if (!role) {
-        const tagName = htmlEl.tagName.toLowerCase();
-        if (tagName === "a") role = "link";
-        else if (tagName === "button") role = "button";
-        else if (tagName === "input") {
-          const type = htmlEl.type;
-          if (type === "submit" || type === "button") role = "button";
-          else if (type === "checkbox") role = "checkbox";
-          else if (type === "radio") role = "radio";
-          else role = "textbox";
-        } else if (tagName === "select") role = "combobox";
-        else if (tagName === "textarea") role = "textbox";
-        else role = "generic";
-      }
-      const name = htmlEl.getAttribute("aria-label") || htmlEl.getAttribute("title") || htmlEl.placeholder || "";
-      const text = (htmlEl.textContent || "").trim().substring(0, 100);
-      const value = htmlEl.value || "";
-      const href = htmlEl.href || "";
-      const placeholder = htmlEl.placeholder || "";
-      const isEditable = htmlEl.tagName.toLowerCase() === "input" || htmlEl.tagName.toLowerCase() === "textarea" || htmlEl.tagName.toLowerCase() === "select" || htmlEl.isContentEditable;
-      const isClickable = htmlEl.tagName.toLowerCase() === "a" || htmlEl.tagName.toLowerCase() === "button" || role === "button" || role === "link" || !!htmlEl.onclick || style.cursor === "pointer";
-      results.push({
-        tagName: htmlEl.tagName.toLowerCase(),
-        role,
-        name,
-        text,
-        value,
-        href,
-        placeholder,
-        isEditable,
-        isClickable,
-        isVisible,
-        rect: isVisible ? rect : null
-      });
-    });
-    return results;
-  });
-  const elementRefs = elements.map((el, index) => ({
-    ref: generateRef(index),
-    role: el.role,
-    name: el.name || void 0,
-    tagName: el.tagName,
-    text: el.text || void 0,
-    value: el.value || void 0,
-    href: el.href || void 0,
-    placeholder: el.placeholder || void 0,
-    isEditable: el.isEditable,
-    isClickable: el.isClickable,
-    isVisible: el.isVisible,
-    boundingBox: el.rect ? {
-      x: el.rect.x,
-      y: el.rect.y,
-      width: el.rect.width,
-      height: el.rect.height
-    } : void 0
-  }));
-  const formFields = elementRefs.filter((e) => e.isEditable);
-  const buttons = elementRefs.filter((e) => e.role === "button" || e.tagName === "button");
-  const links = elementRefs.filter((e) => e.role === "link" || e.tagName === "a");
-  return {
-    id: snapshotId,
-    url,
-    title,
-    timestamp: Date.now(),
-    elements: elementRefs,
-    formFields,
-    buttons,
-    links
-  };
-}
-const ACTION_SCHEMAS = {
-  click: { requiredFields: ["ref"], optionalFields: ["description"] },
-  fill: { requiredFields: ["ref", "value"], optionalFields: ["description"] },
-  select: { requiredFields: ["ref", "value"], optionalFields: ["description"] },
-  press: { requiredFields: ["key"], optionalFields: ["ref", "description"] },
-  scroll: { requiredFields: [], optionalFields: ["ref", "description"] },
-  navigate: { requiredFields: ["url"], optionalFields: ["description"] },
-  wait: { requiredFields: ["duration"], optionalFields: ["description"] }
-};
-function validateAction(action) {
-  const schema = ACTION_SCHEMAS[action.type];
-  if (!schema) {
-    return { valid: false, error: `Unknown action type: ${action.type}` };
-  }
-  for (const field of schema.requiredFields) {
-    if (!(field in action) || action[field] === void 0) {
-      return { valid: false, error: `Missing required field: ${field} for action ${action.type}` };
-    }
-  }
-  return { valid: true };
-}
-function validateActions(actions) {
-  const errors = [];
-  for (let i = 0; i < actions.length; i++) {
-    const result = validateAction(actions[i]);
-    if (!result.valid) {
-      errors.push(`Action ${i}: ${result.error}`);
-    }
-  }
-  return { valid: errors.length === 0, errors };
-}
-async function getLocatorForRef(page, snapshot, ref) {
-  const element = snapshot.elements.find((e) => e.ref === ref);
-  if (!element) {
-    return { locator: null, element: null };
-  }
-  let locator = null;
-  if (element.role && element.name) {
-    locator = page.getByRole(element.role, {
-      name: element.name
-    });
-  } else if (element.placeholder) {
-    locator = page.getByPlaceholder(element.placeholder);
-  } else if (element.text) {
-    locator = page.getByText(element.text.substring(0, 50));
-  } else if (element.href && element.tagName === "a") {
-    locator = page.locator(`a[href="${element.href}"]`);
-  }
-  if (!locator && element.boundingBox) {
-    return { locator: null, element };
-  }
-  return { locator, element };
-}
-async function executeAction(page, snapshot, action) {
-  const timestamp = Date.now();
-  const validation = validateAction(action);
-  if (!validation.valid) {
-    return {
-      success: false,
-      action,
-      error: validation.error,
-      timestamp
-    };
-  }
-  try {
-    switch (action.type) {
-      case "click": {
-        const { locator, element } = await getLocatorForRef(page, snapshot, action.ref);
-        if (locator) {
-          await locator.click({ timeout: 5e3 });
-        } else if (element?.boundingBox) {
-          const { x, y, width, height } = element.boundingBox;
-          await page.mouse.click(x + width / 2, y + height / 2);
-        } else {
-          return {
-            success: false,
-            action,
-            error: `Element not found: ${action.ref}`,
-            timestamp
-          };
-        }
-        break;
-      }
-      case "fill": {
-        const { locator, element } = await getLocatorForRef(page, snapshot, action.ref);
-        if (locator) {
-          await locator.fill(action.value, { timeout: 5e3 });
-        } else if (element?.boundingBox) {
-          const { x, y, width, height } = element.boundingBox;
-          await page.mouse.click(x + width / 2, y + height / 2);
-          await page.keyboard.type(action.value);
-        } else {
-          return {
-            success: false,
-            action,
-            error: `Element not found: ${action.ref}`,
-            timestamp
-          };
-        }
-        break;
-      }
-      case "select": {
-        const { locator } = await getLocatorForRef(page, snapshot, action.ref);
-        if (locator) {
-          await locator.selectOption(action.value, { timeout: 5e3 });
-        } else {
-          return {
-            success: false,
-            action,
-            error: `Element not found: ${action.ref}`,
-            timestamp
-          };
-        }
-        break;
-      }
-      case "press": {
-        if (action.ref) {
-          const { locator } = await getLocatorForRef(page, snapshot, action.ref);
-          if (locator) {
-            await locator.press(action.key, { timeout: 5e3 });
-          } else {
-            return {
-              success: false,
-              action,
-              error: `Element not found: ${action.ref}`,
-              timestamp
-            };
-          }
-        } else {
-          await page.keyboard.press(action.key);
-        }
-        break;
-      }
-      case "scroll": {
-        if (action.ref) {
-          const { locator } = await getLocatorForRef(page, snapshot, action.ref);
-          if (locator) {
-            await locator.scrollIntoViewIfNeeded({ timeout: 5e3 });
-          }
-        } else {
-          await page.evaluate(() => window.scrollBy(0, 300));
-        }
-        break;
-      }
-      case "navigate": {
-        await page.goto(action.url, { timeout: 3e4, waitUntil: "domcontentloaded" });
-        break;
-      }
-      case "wait": {
-        await page.waitForTimeout(action.duration);
-        break;
-      }
-      default:
-        return {
-          success: false,
-          action,
-          error: `Unknown action type: ${action.type}`,
-          timestamp
-        };
-    }
-    return { success: true, action, timestamp };
-  } catch (error) {
-    return {
-      success: false,
-      action,
-      error: error instanceof Error ? error.message : String(error),
-      timestamp
-    };
-  }
-}
-async function executeActions(page, snapshot, actions) {
-  const results = [];
-  for (const action of actions) {
-    const result = await executeAction(page, snapshot, action);
-    results.push(result);
-    if (!result.success) {
-      break;
-    }
-    await page.waitForTimeout(100);
-  }
-  return results;
-}
-const DEFAULT_CONFIG = {
-  maxIterations: 50,
-  timeout: 12e4,
-  // 2 minutes
-  headless: false,
-  // Show browser for debugging
-  userDataDir: ""
-};
-function detectNeedsInput(snapshot) {
-  const url = snapshot.url.toLowerCase();
-  const title = snapshot.title.toLowerCase();
-  const loginIndicators = ["login", "sign in", "signin", "log in", "authenticate"];
-  const hasLoginIndicator = loginIndicators.some((i) => url.includes(i) || title.includes(i)) || snapshot.formFields.some(
-    (f) => f.name?.toLowerCase().includes("password") || f.placeholder?.toLowerCase().includes("password")
-  );
-  if (hasLoginIndicator) {
-    return {
-      needsInput: true,
-      reason: "login",
-      message: "Login required. Please log in and then continue."
-    };
-  }
-  const captchaIndicators = ["captcha", "recaptcha", "hcaptcha", "verify you are human"];
-  const hasCaptcha = captchaIndicators.some((i) => title.includes(i)) || snapshot.elements.some((e) => e.text?.toLowerCase().includes("captcha"));
-  if (hasCaptcha) {
-    return {
-      needsInput: true,
-      reason: "captcha",
-      message: "CAPTCHA detected. Please solve it and then continue."
-    };
-  }
-  return { needsInput: false };
-}
-class AutomationLoop {
-  constructor(config = {}) {
-    this.browser = null;
-    this.context = null;
-    this.page = null;
-    this.state = "running";
-    this.iteration = 0;
-    this.lastSnapshot = null;
-    this.config = { ...DEFAULT_CONFIG, ...config };
-  }
-  /**
-   * Initialize the browser
-   */
-  async initialize() {
-    this.browser = await playwright.chromium.launch({
-      headless: this.config.headless
-    });
-    const contextOptions = {
-      viewport: { width: 1280, height: 800 }
-    };
-    if (this.config.userDataDir) {
-      this.context = await playwright.chromium.launchPersistentContext(this.config.userDataDir, {
-        headless: this.config.headless,
-        viewport: { width: 1280, height: 800 }
-      });
-      this.page = this.context.pages()[0] || await this.context.newPage();
-    } else {
-      this.context = await this.browser.newContext(contextOptions);
-      this.page = await this.context.newPage();
-    }
-  }
-  /**
-   * Navigate to a URL
-   */
-  async navigateTo(url) {
-    if (!this.page) throw new Error("Browser not initialized");
-    await this.page.goto(url, {
-      timeout: 3e4,
-      waitUntil: "domcontentloaded"
-    });
-    await this.page.waitForLoadState("networkidle", { timeout: 1e4 }).catch(() => {
-    });
-    this.lastSnapshot = await takeSnapshot(this.page);
-    return this.lastSnapshot;
-  }
-  /**
-   * Get the current page snapshot
-   */
-  async getSnapshot() {
-    if (!this.page) throw new Error("Browser not initialized");
-    this.lastSnapshot = await takeSnapshot(this.page);
-    return this.lastSnapshot;
-  }
-  /**
-   * Run a single iteration of the loop
-   */
-  async runIteration(decider) {
-    if (!this.page) throw new Error("Browser not initialized");
-    this.iteration++;
-    const snapshot = await this.getSnapshot();
-    const needsInputCheck = detectNeedsInput(snapshot);
-    if (needsInputCheck.needsInput) {
-      this.state = "needs_input";
-      return {
-        state: "needs_input",
-        snapshot,
-        actionsExecuted: [],
-        needsInputReason: needsInputCheck.reason,
-        needsInputMessage: needsInputCheck.message
-      };
-    }
-    const decision = await decider(snapshot, this.iteration);
-    if ("state" in decision) {
-      if (decision.state === "completed") {
-        this.state = "completed";
-        return {
-          state: "completed",
-          snapshot,
-          actionsExecuted: []
-        };
-      }
-      if (decision.state === "needs_input") {
-        this.state = "needs_input";
-        return {
-          state: "needs_input",
-          snapshot,
-          actionsExecuted: [],
-          needsInputReason: decision.reason,
-          needsInputMessage: decision.message
-        };
-      }
-      if (decision.state === "failed") {
-        this.state = "failed";
-        return {
-          state: "failed",
-          snapshot,
-          actionsExecuted: [],
-          error: decision.error
-        };
-      }
-    }
-    const actions = decision.actions;
-    const validation = validateActions(actions);
-    if (!validation.valid) {
-      return {
-        state: "running",
-        snapshot,
-        actionsExecuted: [],
-        error: `Invalid actions: ${validation.errors.join(", ")}`
-      };
-    }
-    const results = await executeActions(this.page, snapshot, actions);
-    const failedAction = results.find((r) => !r.success);
-    if (failedAction) {
-      return {
-        state: "running",
-        snapshot,
-        actionsExecuted: results,
-        error: failedAction.error
-      };
-    }
-    return {
-      state: "running",
-      snapshot,
-      actionsExecuted: results
-    };
-  }
-  /**
-   * Run the full automation loop until completion or terminal state
-   */
-  async run(startUrl, decider, onIteration) {
-    await this.initialize();
-    await this.navigateTo(startUrl);
-    const startTime = Date.now();
-    while (this.state === "running" && this.iteration < this.config.maxIterations && Date.now() - startTime < this.config.timeout) {
-      const result = await this.runIteration(decider);
-      if (onIteration) {
-        onIteration(result);
-      }
-      if (result.state !== "running") {
-        return result;
-      }
-      await this.page?.waitForTimeout(500);
-    }
-    if (this.iteration >= this.config.maxIterations) {
-      this.state = "failed";
-      return {
-        state: "failed",
-        snapshot: this.lastSnapshot,
-        actionsExecuted: [],
-        error: `Max iterations (${this.config.maxIterations}) reached`
-      };
-    }
-    if (Date.now() - startTime >= this.config.timeout) {
-      this.state = "failed";
-      return {
-        state: "failed",
-        snapshot: this.lastSnapshot,
-        actionsExecuted: [],
-        error: `Timeout (${this.config.timeout}ms) reached`
-      };
-    }
-    return {
-      state: this.state,
-      snapshot: this.lastSnapshot,
-      actionsExecuted: []
-    };
-  }
-  /**
-   * Resume from needs_input state
-   */
-  async resume() {
-    if (this.state !== "needs_input") {
-      throw new Error("Cannot resume: not in needs_input state");
-    }
-    this.state = "running";
-  }
-  /**
-   * Cancel the automation
-   */
-  cancel() {
-    this.state = "cancelled";
-  }
-  /**
-   * Get current state
-   */
-  getState() {
-    return this.state;
-  }
-  /**
-   * Get current iteration count
-   */
-  getIteration() {
-    return this.iteration;
-  }
-  /**
-   * Cleanup resources
-   */
-  async cleanup() {
-    if (this.page) {
-      await this.page.close().catch(() => {
-      });
-    }
-    if (this.context) {
-      await this.context.close().catch(() => {
-      });
-    }
-    if (this.browser) {
-      await this.browser.close().catch(() => {
-      });
-    }
-    this.page = null;
-    this.context = null;
-    this.browser = null;
-  }
-}
-const MAX_RECENT_JOBS = 10;
-class AutomationService {
-  activeJob = null;
-  recentJobs = [];
+class BrowserAgentService {
+  cerebrasClient = null;
+  openaiClient = null;
+  apiKey = null;
+  cerebrasKey = null;
   eventEmitter = null;
-  jobCounter = 0;
-  activeLoop = null;
+  activeJobId = null;
+  cancelled = false;
   /**
-   * Set the event emitter for broadcasting automation events
+   * Set the event emitter for sending events to the renderer
    */
   setEventEmitter(emitter) {
     this.eventEmitter = emitter;
   }
   /**
-   * Emit an automation event
+   * Emit an event
    */
-  emitEvent(type, job, previousStatus) {
+  emit(event) {
     if (this.eventEmitter) {
-      this.eventEmitter(
-        createEvent(type, { job, previousStatus }, job.id)
-      );
+      this.eventEmitter(event);
     }
   }
   /**
-   * Generate a unique automation job ID
+   * Get or create Cerebras client (preferred for browser agent - much faster inference)
+   * Falls back to OpenAI if Cerebras key not configured
    */
-  generateJobId() {
-    this.jobCounter++;
-    return `auto-${Date.now()}-${this.jobCounter}`;
-  }
-  /**
-   * Create and start a new automation job
-   */
-  startJob(request) {
-    if (this.activeJob && !this.isTerminal(this.activeJob.status)) {
-      this.cancelJob(this.activeJob.id);
-    }
-    const now = Date.now();
-    const job = {
-      id: this.generateJobId(),
-      type: request.type,
-      status: "pending",
-      createdAt: now,
-      updatedAt: now,
-      targetUrl: request.targetUrl,
-      input: request.context,
-      stepCount: 0
-    };
-    this.activeJob = job;
-    const baseJob = jobManager.createJob(request.type, request.context);
-    job.id = baseJob.id;
-    this.emitEvent(EventTypes.AUTOMATION_STARTED, job);
-    this.transitionJob(job.id, "running");
-    return job;
-  }
-  /**
-   * Get the current automation state
-   */
-  getState() {
-    return {
-      activeJob: this.activeJob,
-      recentJobs: [...this.recentJobs]
-    };
-  }
-  /**
-   * Get a job by ID
-   */
-  getJob(id) {
-    if (this.activeJob?.id === id) {
-      return this.activeJob;
-    }
-    return this.recentJobs.find((j) => j.id === id) ?? null;
-  }
-  /**
-   * Check if a status is terminal
-   */
-  isTerminal(status) {
-    return ["completed", "failed", "cancelled"].includes(status);
-  }
-  /**
-   * Transition a job to a new status
-   */
-  transitionJob(id, newStatus, options) {
-    const job = this.getJob(id);
-    if (!job) return false;
-    const success = jobManager.transitionJob(id, newStatus, {
-      output: options?.output,
-      error: options?.error
-    });
-    if (!success) return false;
-    const previousStatus = job.status;
-    job.status = newStatus;
-    job.updatedAt = Date.now();
-    if (options?.output !== void 0) {
-      job.output = options.output;
-    }
-    if (options?.error !== void 0) {
-      job.error = options.error;
-    }
-    if (options?.currentStep !== void 0) {
-      job.currentStep = options.currentStep;
-      job.stepCount = (job.stepCount ?? 0) + 1;
-    }
-    if (options?.needsInputReason !== void 0) {
-      job.needsInputReason = options.needsInputReason;
-    }
-    if (options?.needsInputMessage !== void 0) {
-      job.needsInputMessage = options.needsInputMessage;
-    }
-    switch (newStatus) {
-      case "running":
-        if (options?.currentStep) {
-          this.emitEvent(EventTypes.AUTOMATION_STEP, job, previousStatus);
-        }
-        break;
-      case "completed":
-        this.emitEvent(EventTypes.AUTOMATION_COMPLETED, job, previousStatus);
-        this.moveToRecent(job);
-        break;
-      case "failed":
-        this.emitEvent(EventTypes.AUTOMATION_FAILED, job, previousStatus);
-        this.moveToRecent(job);
-        break;
-      case "cancelled":
-        this.emitEvent(EventTypes.AUTOMATION_CANCELLED, job, previousStatus);
-        this.moveToRecent(job);
-        break;
-      case "needs_input":
-        this.emitEvent(EventTypes.AUTOMATION_NEEDS_INPUT, job, previousStatus);
-        break;
-    }
-    return true;
-  }
-  /**
-   * Move a job from active to recent
-   */
-  moveToRecent(job) {
-    if (this.activeJob?.id === job.id) {
-      this.activeJob = null;
-    }
-    this.recentJobs.unshift(job);
-    if (this.recentJobs.length > MAX_RECENT_JOBS) {
-      this.recentJobs.pop();
-    }
-  }
-  /**
-   * Update the current step of a running job
-   */
-  updateStep(id, step) {
-    const job = this.getJob(id);
-    if (!job || job.status !== "running") return false;
-    job.currentStep = step;
-    job.stepCount = (job.stepCount ?? 0) + 1;
-    job.updatedAt = Date.now();
-    this.emitEvent(EventTypes.AUTOMATION_STEP, job);
-    return true;
-  }
-  /**
-   * Mark a job as needing user input
-   */
-  needsInput(id, reason, message) {
-    return this.transitionJob(id, "needs_input", {
-      needsInputReason: reason,
-      needsInputMessage: message
-    });
-  }
-  /**
-   * Resume a job from needs_input state
-   */
-  resumeJob(id, input) {
-    const job = this.getJob(id);
-    if (!job || job.status !== "needs_input") return false;
-    job.needsInputReason = void 0;
-    job.needsInputMessage = void 0;
-    if (input !== void 0) {
-      job.input = { ...job.input, userInput: input };
-    }
-    return this.transitionJob(id, "running");
-  }
-  /**
-   * Complete a job successfully
-   */
-  completeJob(id, output) {
-    return this.transitionJob(id, "completed", { output });
-  }
-  /**
-   * Fail a job with an error
-   */
-  failJob(id, error) {
-    return this.transitionJob(id, "failed", { error });
-  }
-  /**
-   * Cancel a job
-   */
-  cancelJob(id) {
-    const job = this.getJob(id);
-    if (!job || this.isTerminal(job.status)) return false;
-    return this.transitionJob(id, "cancelled");
-  }
-  /**
-   * Get the active job (if any)
-   */
-  getActiveJob() {
-    return this.activeJob;
-  }
-  /**
-   * Check if there's an active (non-terminal) job
-   */
-  hasActiveJob() {
-    return this.activeJob !== null && !this.isTerminal(this.activeJob.status);
-  }
-  /**
-   * Clear all jobs (for testing)
-   */
-  clear() {
-    this.activeJob = null;
-    this.recentJobs = [];
-    this.jobCounter = 0;
-    this.activeLoop = null;
-  }
-  /**
-   * Run the automation loop for a job
-   * This is the core snapshot → decide → execute → resnapshot loop
-   */
-  async runAutomationLoop(jobId, startUrl, decider) {
-    const job = this.getJob(jobId);
-    if (!job || job.status !== "running") {
-      console.error(`[AutomationService] Cannot run loop: job ${jobId} not in running state`);
-      return;
-    }
-    this.activeLoop = new AutomationLoop({
-      maxIterations: 50,
-      timeout: 12e4,
-      // 2 minutes (NFR3 target)
-      headless: false
-      // Show browser for MVP
-    });
-    try {
-      const result = await this.activeLoop.run(
-        startUrl,
-        decider,
-        (iterationResult) => {
-          if (iterationResult.actionsExecuted.length > 0) {
-            const lastAction = iterationResult.actionsExecuted[iterationResult.actionsExecuted.length - 1];
-            this.updateStep(jobId, lastAction.action.description || lastAction.action.type);
-          }
-          if (iterationResult.state === "needs_input") {
-            this.needsInput(
-              jobId,
-              iterationResult.needsInputReason || "other",
-              iterationResult.needsInputMessage
-            );
-          }
-        }
-      );
-      if (result.state === "completed") {
-        this.completeJob(jobId, { url: result.snapshot.url });
-      } else if (result.state === "failed") {
-        this.failJob(jobId, {
-          code: "AUTOMATION_BROWSER_ERROR",
-          message: result.error || "Automation failed"
+  async getLLMClient() {
+    const cerebrasKey = await secretsService.getCerebrasKey();
+    if (cerebrasKey) {
+      if (!this.cerebrasClient || this.cerebrasKey !== cerebrasKey) {
+        this.cerebrasKey = cerebrasKey;
+        this.cerebrasClient = new OpenAI({
+          apiKey: cerebrasKey,
+          baseURL: "https://api.cerebras.ai/v1"
         });
-      } else if (result.state === "cancelled") {
       }
-    } catch (error) {
-      this.failJob(jobId, {
-        code: "AUTOMATION_BROWSER_ERROR",
-        message: error instanceof Error ? error.message : String(error)
+      const model = storeService.getSetting("cerebras.model") || "qwen-3-32b";
+      return { client: this.cerebrasClient, model };
+    }
+    const openaiKey = await secretsService.getOpenAIKey();
+    if (!openaiKey) {
+      throw new Error("No API key configured. Set Cerebras or OpenAI key in Settings.");
+    }
+    if (!this.openaiClient || this.apiKey !== openaiKey) {
+      this.apiKey = openaiKey;
+      this.openaiClient = new OpenAI({ apiKey: openaiKey });
+    }
+    return { client: this.openaiClient, model: "gpt-4o" };
+  }
+  /**
+   * Escape a string for shell usage (wrap in single quotes, escape internal quotes)
+   */
+  escapeShellArg(arg) {
+    return `'${arg.replace(/'/g, "'\\''")}'`;
+  }
+  /**
+   * Execute an agent-browser CLI command
+   */
+  async execAgentBrowser(args) {
+    return new Promise((resolve, reject) => {
+      const cmd = "npx";
+      const escapedArgs = args.map((arg, i) => {
+        if (i === 0) return arg;
+        if (arg.startsWith("@") || arg.startsWith("-")) return arg;
+        if (arg.startsWith("http://") || arg.startsWith("https://")) {
+          return this.escapeShellArg(arg);
+        }
+        return this.escapeShellArg(arg);
       });
-    } finally {
-      await this.activeLoop.cleanup();
-      this.activeLoop = null;
+      const fullArgs = ["agent-browser", ...escapedArgs];
+      console.log(`[BrowserAgent] Executing: ${cmd} ${fullArgs.join(" ")}`);
+      const proc = child_process.spawn(cmd, fullArgs, {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          // Ensure PATH includes common node locations
+          PATH: `${process.env.PATH}:/usr/local/bin:/opt/homebrew/bin`
+        },
+        shell: true,
+        stdio: ["pipe", "pipe", "pipe"]
+      });
+      let stdout = "";
+      let stderr = "";
+      proc.stdout?.on("data", (data) => {
+        const str = data.toString();
+        stdout += str;
+        console.log(`[BrowserAgent stdout] ${str.trim()}`);
+      });
+      proc.stderr?.on("data", (data) => {
+        const str = data.toString();
+        stderr += str;
+        console.log(`[BrowserAgent stderr] ${str.trim()}`);
+      });
+      proc.on("close", (code) => {
+        console.log(`[BrowserAgent] Command exited with code ${code}`);
+        if (code === 0) {
+          resolve(stdout.trim());
+        } else {
+          reject(new Error(stderr || `agent-browser exited with code ${code}`));
+        }
+      });
+      proc.on("error", (err) => {
+        console.error(`[BrowserAgent] Spawn error:`, err);
+        reject(err);
+      });
+    });
+  }
+  /**
+   * Open a URL in the browser (launches browser if not already open)
+   */
+  async open(url) {
+    console.log(`[BrowserAgent] Opening: ${url}`);
+    await this.execAgentBrowser(["open", url, "--headed"]);
+  }
+  /**
+   * Get a snapshot of the current page
+   */
+  async snapshot() {
+    console.log("[BrowserAgent] Taking snapshot...");
+    const output = await this.execAgentBrowser(["snapshot", "-i", "--json"]);
+    try {
+      return JSON.parse(output);
+    } catch {
+      return { success: false, error: "Failed to parse snapshot" };
     }
   }
   /**
-   * Get the active automation loop (for testing)
+   * Click an element by ref
    */
-  getActiveLoop() {
-    return this.activeLoop;
+  async click(ref) {
+    console.log(`[BrowserAgent] Clicking: ${ref}`);
+    try {
+      await this.execAgentBrowser(["click", ref]);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  }
+  /**
+   * Fill a text field by ref
+   */
+  async fill(ref, value) {
+    console.log(`[BrowserAgent] Filling ${ref}: "${value.substring(0, 50)}..."`);
+    try {
+      await this.execAgentBrowser(["fill", ref, value]);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  }
+  /**
+   * Select an option by ref
+   * agent-browser expects: select <ref> <value>
+   */
+  async select(ref, value) {
+    console.log(`[BrowserAgent] Selecting ${ref}: "${value}"`);
+    try {
+      await this.execAgentBrowser(["select", ref, value]);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  }
+  /**
+   * Hover over an element by ref
+   */
+  async hover(ref) {
+    console.log(`[BrowserAgent] Hovering: ${ref}`);
+    try {
+      await this.execAgentBrowser(["hover", ref]);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  }
+  /**
+   * Scroll the page
+   */
+  async scroll(direction) {
+    try {
+      await this.execAgentBrowser(["scroll", direction]);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  }
+  /**
+   * Close the browser
+   */
+  async close() {
+    console.log("[BrowserAgent] Closing browser");
+    try {
+      await this.execAgentBrowser(["close"]);
+    } catch {
+    }
+  }
+  /**
+   * Ask the LLM what to do next
+   */
+  async decideNextActions(snapshot, task, context, actionHistory) {
+    const { client, model } = await this.getLLMClient();
+    const systemPrompt = `You are a browser automation agent. You control a web browser to complete tasks for the user.
+
+You receive:
+1. A TASK describing what the user wants to accomplish
+2. A PAGE SNAPSHOT showing the current page state with element refs (like @e1, @e2)
+3. CONTEXT with additional information (e.g., resume text, user info)
+4. ACTION HISTORY showing what you've already done
+
+Your job is to decide what actions to take next.
+
+AVAILABLE ACTIONS:
+- click: Click an element (buttons, links, radio buttons, checkboxes). { "type": "click", "ref": "@e5" }
+- fill: Fill a text field/textbox. { "type": "fill", "ref": "@e3", "value": "John Doe" }
+- select: Select from a dropdown/listbox. { "type": "select", "ref": "@e7", "value": "California" }
+- hover: Hover over an element. { "type": "hover", "ref": "@e2" }
+- scroll: Scroll the page. { "type": "scroll", "direction": "down" }
+- wait: Wait for a moment. { "type": "wait", "seconds": 2 }
+- navigate: Go to a URL. { "type": "navigate", "url": "https://..." }
+- upload: Upload the user's document to a file input. { "type": "upload", "ref": "@e8" }
+
+ELEMENT TYPES:
+- textbox: Use "fill" action
+- listbox/combobox: For Google Forms and similar, click the OPTION element directly (e.g., click @e6 for "Software Engineering" option). Do NOT use "select" action on Google Forms.
+- radio: Use "click" action to select the radio option
+- checkbox: Use "click" action to toggle the checkbox
+- button/link: Use "click" action
+- option: Use "click" action to select the option in a dropdown
+
+RESPONSE FORMAT (JSON only):
+1. To execute actions:
+   { "type": "actions", "actions": [{ "type": "click", "ref": "@e5" }, { "type": "fill", "ref": "@e3", "value": "John" }] }
+
+2. When task is complete:
+   { "type": "completed", "reason": "Successfully submitted the form" }
+
+3. When user input is needed (login, captcha, ambiguity):
+   { "type": "needs_input", "reason": "login", "message": "Please log in to continue" }
+
+4. When task cannot be completed:
+   { "type": "failed", "reason": "Cannot find the submit button on this page" }
+
+IMPORTANT RULES:
+- Only use refs that exist in the current snapshot
+- Fill forms with information from the CONTEXT when available
+- A "Sign in" link on a page does NOT mean login is required - many forms work without login
+- Only return needs_input for login if the page BLOCKS you from proceeding (e.g., "You must sign in to continue")
+- If you see a CAPTCHA that blocks progress, return needs_input
+
+FORM FILLING RULES (CRITICAL):
+- When you see a form, you MUST fill ALL visible input fields before clicking submit
+- Fill textboxes, select dropdowns, check checkboxes, and select radio buttons
+- Do NOT click submit until you have filled every field on the form
+- For each iteration, fill 3-5 fields at a time, then get a new snapshot to see remaining fields
+- If you don't have specific info for a field, generate reasonable placeholder values (e.g., "Software Engineer" for job title, "5 years" for experience)
+- For date fields, use today's date or a reasonable date
+- For rating/scale questions (1-5), pick a reasonable middle value like 3 or 4
+- Only click Submit/Next AFTER all visible fields are filled
+- AFTER selecting radio buttons (especially for work location like On-site/Hybrid/Remote), NEW FIELDS may appear. Always scroll down and check for new fields before submitting.
+- If a required field asks for information not in your context (like office location), use a reasonable placeholder like "San Francisco, CA" or "Remote"
+
+DETECTING STUCK LOOPS:
+- If you click Submit and the page snapshot looks THE SAME (same fields, same refs), the form has validation errors
+- Look for any unfilled required fields and fill them
+- Scroll down to check for fields you might have missed
+- If stuck after 3 submit attempts, return { "type": "needs_input", "reason": "validation", "message": "Form has required fields I cannot fill - please review" }
+
+- Respond with ONLY valid JSON, no explanations`;
+    let contextStr = "No additional context provided.";
+    if (context.resumeText) {
+      contextStr = `RESUME/USER INFO:
+${context.resumeText}`;
+      if (context.additionalInfo) {
+        contextStr += "\n\n" + Object.entries(context.additionalInfo).map(([k, v]) => `${k}: ${v}`).join("\n");
+      }
+    }
+    if (context.documentFilePath) {
+      contextStr += `
+
+DOCUMENT FILE AVAILABLE: ${context.documentFilePath}
+You can use the "upload" action to upload this file to file input fields.`;
+    }
+    const historyStr = actionHistory.length > 0 ? `PREVIOUS ACTIONS:
+${actionHistory.slice(-10).join("\n")}` : "No actions taken yet.";
+    const userPrompt = `TASK: ${task}
+
+PAGE SNAPSHOT:
+${snapshot.data?.snapshot || "Failed to get snapshot"}
+
+CONTEXT:
+${contextStr}
+
+${historyStr}
+
+What should I do next? Respond with JSON only.`;
+    try {
+      console.log(`[BrowserAgent] Using model: ${model}`);
+      const isOpenAI = model.startsWith("gpt-");
+      const response = await client.chat.completions.create({
+        model,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt }
+        ],
+        temperature: 0.2,
+        max_tokens: 2048,
+        // Only add response_format for OpenAI (Cerebras models may not support it)
+        ...isOpenAI ? { response_format: { type: "json_object" } } : {}
+      });
+      const content = response.choices[0]?.message?.content;
+      if (!content) {
+        return { type: "failed", reason: "LLM returned empty response" };
+      }
+      let jsonStr = content.trim();
+      const thinkEndIndex = jsonStr.indexOf("</think>");
+      if (thinkEndIndex !== -1) {
+        jsonStr = jsonStr.slice(thinkEndIndex + 8).trim();
+      }
+      if (jsonStr.startsWith("```json")) {
+        jsonStr = jsonStr.slice(7);
+      } else if (jsonStr.startsWith("```")) {
+        jsonStr = jsonStr.slice(3);
+      }
+      if (jsonStr.endsWith("```")) {
+        jsonStr = jsonStr.slice(0, -3);
+      }
+      jsonStr = jsonStr.trim();
+      let decision;
+      try {
+        decision = JSON.parse(jsonStr);
+      } catch (parseError) {
+        console.warn("[BrowserAgent] JSON parse failed, attempting repair...");
+        let repairedJson = jsonStr;
+        const openBraces = (repairedJson.match(/{/g) || []).length;
+        const closeBraces = (repairedJson.match(/}/g) || []).length;
+        const openBrackets = (repairedJson.match(/\[/g) || []).length;
+        const closeBrackets = (repairedJson.match(/]/g) || []).length;
+        for (let i = 0; i < openBrackets - closeBrackets; i++) {
+          repairedJson += "]";
+        }
+        for (let i = 0; i < openBraces - closeBraces; i++) {
+          repairedJson += "}";
+        }
+        try {
+          decision = JSON.parse(repairedJson);
+          console.log("[BrowserAgent] JSON repair successful");
+        } catch {
+          throw parseError;
+        }
+      }
+      console.log("[BrowserAgent] LLM decision:", JSON.stringify(decision, null, 2));
+      if (!decision.type && Object.keys(decision).length === 0) {
+        return { type: "failed", reason: "LLM returned empty JSON object - retrying" };
+      }
+      return decision;
+    } catch (error) {
+      console.error("[BrowserAgent] LLM error:", error);
+      return { type: "failed", reason: `LLM error: ${error.message}` };
+    }
+  }
+  /**
+   * Execute a single action
+   */
+  async executeAction(action, context) {
+    switch (action.type) {
+      case "click":
+        return this.click(action.ref);
+      case "fill":
+        return this.fill(action.ref, action.value);
+      case "select":
+        return this.select(action.ref, action.value);
+      case "hover":
+        return this.hover(action.ref);
+      case "scroll":
+        try {
+          await this.execAgentBrowser(["press", action.direction === "down" ? "PageDown" : "PageUp"]);
+          return { success: true };
+        } catch (error) {
+          return { success: false, error: error.message };
+        }
+      case "wait":
+        await new Promise((resolve) => setTimeout(resolve, action.seconds * 1e3));
+        return { success: true };
+      case "navigate":
+        try {
+          await this.open(action.url);
+          return { success: true };
+        } catch (error) {
+          return { success: false, error: error.message };
+        }
+      case "upload":
+        return this.upload(action.ref, context?.documentFilePath);
+      default:
+        return { success: false, error: `Unknown action type: ${action.type}` };
+    }
+  }
+  /**
+   * Upload a file to a file input element
+   */
+  async upload(ref, filePath) {
+    if (!filePath) {
+      return { success: false, error: "No document file available for upload" };
+    }
+    console.log(`[BrowserAgent] Uploading file to ${ref}: ${filePath}`);
+    try {
+      const output = await this.execAgentBrowser(["upload", ref, filePath]);
+      return { success: true, data: output };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  }
+  /**
+   * Run a browser automation task
+   */
+  async runTask(task, context = {}) {
+    this.cancelled = false;
+    const job = jobManager.createJob("browser-agent", { task, context });
+    this.activeJobId = job.id;
+    jobManager.startJob(job.id);
+    console.log(`[BrowserAgent] Starting task: "${task}"`);
+    this.emit(createEvent(EventTypes.AUTOMATION_STARTED, { jobId: job.id, task }));
+    const actionHistory = [];
+    let actionsExecuted = 0;
+    const maxIterations = 30;
+    try {
+      const urlAfterNavWord = task.match(/(?:go to|navigate to|open|visit|browse to)\s+(https?:\/\/[^\s]+|[^\s]+\.[^\s]+)/i);
+      const anyHttpsUrl = task.match(/(https?:\/\/[^\s]+)/i);
+      const urlAfterAt = task.match(/\bat\s+(https?:\/\/[^\s]+)/i);
+      const extractedUrl = urlAfterNavWord?.[1] || urlAfterAt?.[1] || anyHttpsUrl?.[1] || null;
+      let startUrl = context.startUrl;
+      if (!startUrl && extractedUrl) {
+        startUrl = extractedUrl.startsWith("http") ? extractedUrl : `https://${extractedUrl}`;
+      }
+      if (!startUrl) {
+        startUrl = "https://www.google.com";
+      }
+      console.log(`[BrowserAgent] Opening browser at: ${startUrl}`);
+      await this.open(startUrl);
+      await new Promise((resolve) => setTimeout(resolve, 3e3));
+      let submitAttempts = 0;
+      let previousSnapshotText = "";
+      for (let iteration = 0; iteration < maxIterations; iteration++) {
+        if (this.cancelled) {
+          jobManager.cancelJob(job.id);
+          return {
+            success: false,
+            state: "cancelled",
+            actionsExecuted
+          };
+        }
+        await this.scroll("down");
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        await this.scroll("up");
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        const snapshot = await this.snapshot();
+        if (!snapshot.success) {
+          jobManager.failJob(job.id, { code: "BROWSER_ERROR", message: snapshot.error || "Snapshot failed" });
+          return {
+            success: false,
+            state: "failed",
+            error: snapshot.error || "Failed to get page snapshot",
+            actionsExecuted
+          };
+        }
+        const currentSnapshotText = snapshot.data?.snapshot || "";
+        if (currentSnapshotText === previousSnapshotText && submitAttempts > 0) {
+          submitAttempts++;
+          console.log(`[BrowserAgent] Detected same snapshot after submit (attempt ${submitAttempts})`);
+          if (submitAttempts >= 3) {
+            actionHistory.push("WARNING: Form submission failed 3 times - page unchanged. There are likely unfilled required fields or validation errors. Scroll to find hidden fields.");
+          }
+        }
+        previousSnapshotText = currentSnapshotText;
+        const decision = await this.decideNextActions(snapshot, task, context, actionHistory);
+        if (decision.type === "completed") {
+          jobManager.completeJob(job.id, { reason: decision.reason });
+          await this.close();
+          return {
+            success: true,
+            state: "completed",
+            reason: decision.reason,
+            actionsExecuted
+          };
+        }
+        if (decision.type === "needs_input") {
+          jobManager.transitionJob(job.id, "needs_input");
+          return {
+            success: false,
+            state: "needs_input",
+            reason: decision.reason,
+            message: decision.message,
+            actionsExecuted
+          };
+        }
+        if (decision.type === "failed") {
+          jobManager.failJob(job.id, { code: "TASK_FAILED", message: decision.reason });
+          await this.close();
+          return {
+            success: false,
+            state: "failed",
+            error: decision.reason,
+            actionsExecuted
+          };
+        }
+        let actionsToExecute = [];
+        if (decision.type === "actions" && decision.actions.length > 0) {
+          actionsToExecute = decision.actions;
+        } else if ("url" in decision || "ref" in decision || "direction" in decision || "seconds" in decision) {
+          actionsToExecute = [decision];
+        }
+        if (actionsToExecute.length > 0) {
+          for (const action of actionsToExecute) {
+            if (this.cancelled) break;
+            const actionStr = JSON.stringify(action);
+            console.log(`[BrowserAgent] Executing: ${actionStr}`);
+            const result = await this.executeAction(action, context);
+            actionsExecuted++;
+            actionHistory.push(`${actionStr} → ${result.success ? "OK" : result.error}`);
+            if (action.type === "click" && result.success) {
+              const refLower = (action.ref || "").toLowerCase();
+              if (refLower.includes("submit") || actionStr.toLowerCase().includes("submit")) {
+                submitAttempts++;
+                console.log(`[BrowserAgent] Submit click detected (attempt ${submitAttempts})`);
+              }
+            }
+            this.emit(
+              createEvent(EventTypes.AUTOMATION_STEP, {
+                jobId: job.id,
+                action: actionStr,
+                success: result.success
+              })
+            );
+            if (!result.success) {
+              console.warn(`[BrowserAgent] Action failed: ${result.error}`);
+            }
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          }
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1e3));
+      }
+      jobManager.failJob(job.id, { code: "MAX_ITERATIONS", message: "Max iterations reached" });
+      await this.close();
+      return {
+        success: false,
+        state: "failed",
+        error: "Max iterations reached without completing task",
+        actionsExecuted
+      };
+    } catch (error) {
+      const errorMsg = error.message;
+      console.error("[BrowserAgent] Task error:", errorMsg);
+      jobManager.failJob(job.id, { code: "BROWSER_ERROR", message: errorMsg });
+      await this.close();
+      return {
+        success: false,
+        state: "failed",
+        error: errorMsg,
+        actionsExecuted
+      };
+    } finally {
+      this.activeJobId = null;
+    }
+  }
+  /**
+   * Cancel the current task
+   */
+  cancel() {
+    this.cancelled = true;
+    if (this.activeJobId) {
+      jobManager.cancelJob(this.activeJobId);
+    }
+  }
+  /**
+   * Check if a task is running
+   */
+  isRunning() {
+    return this.activeJobId !== null;
+  }
+  /**
+   * Check if the service is available
+   */
+  async isAvailable() {
+    const cerebrasKey = await secretsService.getCerebrasKey();
+    if (cerebrasKey) return true;
+    const openaiKey = await secretsService.getOpenAIKey();
+    return !!openaiKey;
   }
 }
-const automationService = new AutomationService();
+const browserAgentService = new BrowserAgentService();
 const execAsync = util.promisify(child_process.exec);
 function commandExists(command) {
   try {
@@ -4578,14 +4608,447 @@ This is a sample skill that demonstrates the SKILL.md format.
   }
 }
 const skillService = new SkillService();
+class DocumentExtractorService {
+  /**
+   * Check if a string looks like a file path
+   */
+  isFilePath(text) {
+    if (!text) return false;
+    const trimmed = text.trim();
+    if (trimmed.startsWith("/")) {
+      return fs__namespace.existsSync(trimmed);
+    }
+    if (/^[A-Za-z]:\\/.test(trimmed)) {
+      return fs__namespace.existsSync(trimmed);
+    }
+    if (trimmed.startsWith("~")) {
+      const expanded = trimmed.replace("~", process.env.HOME || "");
+      return fs__namespace.existsSync(expanded);
+    }
+    return false;
+  }
+  /**
+   * Check if a file path is a supported document type
+   */
+  isSupportedDocument(filePath) {
+    const ext = path__namespace.extname(filePath).toLowerCase();
+    return [".pdf", ".docx", ".doc", ".txt"].includes(ext);
+  }
+  /**
+   * Get the file type from extension
+   */
+  getFileType(filePath) {
+    const ext = path__namespace.extname(filePath).toLowerCase();
+    switch (ext) {
+      case ".pdf":
+        return "pdf";
+      case ".docx":
+        return "docx";
+      case ".doc":
+        return "doc";
+      case ".txt":
+        return "txt";
+      default:
+        return "unknown";
+    }
+  }
+  /**
+   * Expand home directory in path
+   */
+  expandPath(filePath) {
+    if (filePath.startsWith("~")) {
+      return filePath.replace("~", process.env.HOME || "");
+    }
+    return filePath;
+  }
+  /**
+   * Extract text from a PDF file
+   */
+  async extractFromPdf(filePath) {
+    const dataBuffer = fs__namespace.readFileSync(filePath);
+    const data = await pdfParse(dataBuffer);
+    return data.text;
+  }
+  /**
+   * Extract text from a Word document (.docx)
+   */
+  async extractFromDocx(filePath) {
+    const result = await mammoth.extractRawText({ path: filePath });
+    return result.value;
+  }
+  /**
+   * Extract text from a plain text file
+   */
+  extractFromTxt(filePath) {
+    return fs__namespace.readFileSync(filePath, "utf-8");
+  }
+  /**
+   * Extract text from a document file
+   */
+  async extract(filePath) {
+    const expandedPath = this.expandPath(filePath.trim());
+    const fileType = this.getFileType(expandedPath);
+    if (!fs__namespace.existsSync(expandedPath)) {
+      return {
+        success: false,
+        text: "",
+        filePath: expandedPath,
+        fileType,
+        error: `File not found: ${expandedPath}`
+      };
+    }
+    try {
+      let text = "";
+      switch (fileType) {
+        case "pdf":
+          text = await this.extractFromPdf(expandedPath);
+          break;
+        case "docx":
+          text = await this.extractFromDocx(expandedPath);
+          break;
+        case "doc":
+          try {
+            text = await this.extractFromDocx(expandedPath);
+          } catch {
+            return {
+              success: false,
+              text: "",
+              filePath: expandedPath,
+              fileType,
+              error: "Old .doc format not supported. Please save as .docx"
+            };
+          }
+          break;
+        case "txt":
+          text = this.extractFromTxt(expandedPath);
+          break;
+        default:
+          return {
+            success: false,
+            text: "",
+            filePath: expandedPath,
+            fileType,
+            error: `Unsupported file type: ${path__namespace.extname(expandedPath)}`
+          };
+      }
+      text = text.replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+      console.log(`[DocumentExtractor] Extracted ${text.length} chars from ${fileType}: ${expandedPath}`);
+      return {
+        success: true,
+        text,
+        filePath: expandedPath,
+        fileType
+      };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error(`[DocumentExtractor] Failed to extract from ${expandedPath}:`, errorMsg);
+      return {
+        success: false,
+        text: "",
+        filePath: expandedPath,
+        fileType,
+        error: errorMsg
+      };
+    }
+  }
+  /**
+   * Try to extract document content from clipboard text
+   * Returns the extracted text if clipboard contains a file path to a document,
+   * otherwise returns the original clipboard text
+   */
+  async extractFromClipboard(clipboardText) {
+    if (!clipboardText) {
+      return { text: "", isDocument: false };
+    }
+    const trimmed = clipboardText.trim();
+    if (!this.isFilePath(trimmed)) {
+      return { text: clipboardText, isDocument: false };
+    }
+    if (!this.isSupportedDocument(trimmed)) {
+      return { text: clipboardText, isDocument: false };
+    }
+    const result = await this.extract(trimmed);
+    if (result.success) {
+      return {
+        text: result.text,
+        isDocument: true,
+        filePath: result.filePath,
+        fileType: result.fileType
+      };
+    }
+    console.warn(`[DocumentExtractor] Failed to extract: ${result.error}`);
+    return { text: clipboardText, isDocument: false };
+  }
+}
+const documentExtractorService = new DocumentExtractorService();
+class ChartRendererService {
+  browser = null;
+  openaiClient = null;
+  apiKey = null;
+  /**
+   * Get or create OpenAI client
+   */
+  async getOpenAIClient() {
+    const currentKey = await secretsService.getOpenAIKey();
+    if (!currentKey) {
+      throw new Error("OpenAI API key not configured");
+    }
+    if (!this.openaiClient || this.apiKey !== currentKey) {
+      this.apiKey = currentKey;
+      this.openaiClient = new OpenAI({ apiKey: currentKey });
+    }
+    return this.openaiClient;
+  }
+  /**
+   * Get or launch browser instance
+   */
+  async getBrowser() {
+    if (!this.browser || !this.browser.isConnected()) {
+      console.log("[ChartRenderer] Launching headless browser...");
+      this.browser = await playwright.chromium.launch({
+        headless: true,
+        args: ["--no-sandbox", "--disable-setuid-sandbox"]
+      });
+    }
+    return this.browser;
+  }
+  /**
+   * Detect if command is a chart request
+   */
+  isChartRequest(command) {
+    const chartKeywords = [
+      /\bchart\b/i,
+      /\bgraph\b/i,
+      /\bplot\b/i,
+      /\bvisualize\b/i,
+      /\bvisualise\b/i,
+      /\bbar\s*(chart|graph)?\b/i,
+      /\bline\s*(chart|graph)?\b/i,
+      /\bpie\s*(chart|graph)?\b/i,
+      /\bdoughnut\b/i,
+      /\bhistogram\b/i,
+      /\bscatter\b/i
+    ];
+    return chartKeywords.some((pattern) => pattern.test(command));
+  }
+  /**
+   * Parse table data and generate Chart.js config using LLM
+   */
+  async generateChartConfig(command, tableData, html) {
+    try {
+      const client = await this.getOpenAIClient();
+      const dataContext = html ? `[HTML Table]:
+${html}
+
+[Plain Text]:
+${tableData}` : tableData;
+      const response = await client.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `You are a data visualization expert. Convert tabular data into Chart.js configuration.
+
+RULES:
+1. Return ONLY valid JSON - no markdown, no explanation, no code blocks
+2. Analyze the data to determine the best chart type if not specified
+3. Use appropriate colors (use hex codes)
+4. Keep labels concise
+5. Handle numeric data properly (parse strings to numbers)
+
+OUTPUT FORMAT (strict JSON):
+{
+  "type": "bar|line|pie|doughnut|scatter",
+  "data": {
+    "labels": ["Label1", "Label2", ...],
+    "datasets": [{
+      "label": "Series Name",
+      "data": [10, 20, 30, ...],
+      "backgroundColor": ["#4F46E5", "#10B981", "#F59E0B", ...],
+      "borderColor": "#4F46E5",
+      "borderWidth": 1
+    }]
+  },
+  "options": {
+    "responsive": false,
+    "plugins": {
+      "title": { "display": true, "text": "Chart Title" },
+      "legend": { "position": "bottom" }
+    }
+  }
+}
+
+COLOR PALETTE to use:
+- Primary: #4F46E5 (indigo)
+- Success: #10B981 (emerald)
+- Warning: #F59E0B (amber)
+- Danger: #EF4444 (red)
+- Info: #3B82F6 (blue)
+- Purple: #8B5CF6
+- Pink: #EC4899
+- Cyan: #06B6D4
+
+For pie/doughnut charts, use an array of colors for backgroundColor.
+For bar/line charts, use single colors per dataset.`
+          },
+          {
+            role: "user",
+            content: `Command: ${command}
+
+Data:
+${dataContext}
+
+Generate the Chart.js config JSON:`
+          }
+        ],
+        temperature: 0.2,
+        max_tokens: 2048
+      });
+      const content = response.choices[0]?.message?.content?.trim();
+      if (!content) {
+        return { success: false, error: "LLM returned empty response" };
+      }
+      let jsonStr = content;
+      if (jsonStr.startsWith("```")) {
+        jsonStr = jsonStr.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
+      }
+      try {
+        const config = JSON.parse(jsonStr);
+        return { success: true, config };
+      } catch (parseError) {
+        console.error("[ChartRenderer] Failed to parse chart config:", jsonStr);
+        return { success: false, error: `Invalid JSON from LLM: ${parseError}` };
+      }
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error("[ChartRenderer] Failed to generate config:", errorMsg);
+      return { success: false, error: errorMsg };
+    }
+  }
+  /**
+   * Render Chart.js config to PNG buffer
+   */
+  async renderChartToImage(config, width = 800, height = 600) {
+    const browser = await this.getBrowser();
+    const page = await browser.newPage();
+    try {
+      await page.setViewportSize({ width, height });
+      const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"><\/script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { 
+      background: white; 
+      display: flex; 
+      justify-content: center; 
+      align-items: center;
+      width: ${width}px;
+      height: ${height}px;
+    }
+    #chart-container {
+      width: ${width - 40}px;
+      height: ${height - 40}px;
+    }
+  </style>
+</head>
+<body>
+  <div id="chart-container">
+    <canvas id="chart"></canvas>
+  </div>
+  <script>
+    const config = ${JSON.stringify(config)};
+    
+    // Ensure responsive is false for consistent rendering
+    config.options = config.options || {};
+    config.options.responsive = true;
+    config.options.maintainAspectRatio = false;
+    config.options.animation = false;
+    
+    const ctx = document.getElementById('chart').getContext('2d');
+    new Chart(ctx, config);
+  <\/script>
+</body>
+</html>`;
+      await page.setContent(html);
+      await page.waitForTimeout(500);
+      const screenshot = await page.screenshot({
+        type: "png",
+        omitBackground: false
+      });
+      return screenshot;
+    } finally {
+      await page.close();
+    }
+  }
+  /**
+   * Full pipeline: table data → chart config → PNG image
+   */
+  async createChartFromTable(command, tableData, html) {
+    console.log("[ChartRenderer] Creating chart from table data...");
+    const configResult = await this.generateChartConfig(command, tableData, html);
+    if (!configResult.success || !configResult.config) {
+      return { success: false, error: configResult.error };
+    }
+    console.log("[ChartRenderer] Generated chart config:", configResult.config.type);
+    try {
+      const imageBuffer = await this.renderChartToImage(configResult.config);
+      console.log("[ChartRenderer] Chart rendered successfully, size:", imageBuffer.length, "bytes");
+      return {
+        success: true,
+        imageBuffer,
+        chartConfig: configResult.config
+      };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error("[ChartRenderer] Failed to render chart:", errorMsg);
+      return { success: false, error: errorMsg };
+    }
+  }
+  /**
+   * Cleanup browser instance
+   */
+  async dispose() {
+    if (this.browser) {
+      await this.browser.close();
+      this.browser = null;
+    }
+  }
+}
+const chartRendererService = new ChartRendererService();
 class IntentService {
   eventEmitter = null;
   lastAction = null;
+  chartImagesDir = null;
   /**
    * Set the event emitter for sending events to the renderer
    */
   setEventEmitter(emitter) {
     this.eventEmitter = emitter;
+  }
+  /**
+   * Get the directory for storing chart images
+   */
+  getChartImagesDir() {
+    if (!this.chartImagesDir) {
+      this.chartImagesDir = path.join(electron.app.getPath("userData"), "chart-images");
+      if (!fs.existsSync(this.chartImagesDir)) {
+        fs.mkdirSync(this.chartImagesDir, { recursive: true });
+      }
+    }
+    return this.chartImagesDir;
+  }
+  /**
+   * Save a chart image and return the path
+   */
+  saveChartImage(imageBuffer, jobId) {
+    const dir = this.getChartImagesDir();
+    const filename = `chart-${jobId}.png`;
+    const filepath = path.join(dir, filename);
+    fs.writeFileSync(filepath, imageBuffer);
+    return filepath;
   }
   /**
    * Emit an event to the renderer
@@ -4594,6 +5057,71 @@ class IntentService {
     if (this.eventEmitter) {
       this.eventEmitter(event);
     }
+  }
+  /**
+   * Check if a transcript is a browser automation task
+   */
+  isBrowserTask(transcript) {
+    const normalized = transcript.toLowerCase();
+    const browserKeywords = [
+      "click",
+      "fill out",
+      "fill in",
+      "fill the",
+      "submit",
+      "go to",
+      "navigate to",
+      "open",
+      "browse to",
+      "visit",
+      "scroll",
+      "download",
+      "upload",
+      "sign up",
+      "sign in",
+      "log in",
+      "login",
+      "register",
+      "book",
+      "reserve",
+      "add to cart",
+      "checkout",
+      "buy",
+      "purchase",
+      "search for",
+      "find the",
+      "select",
+      "choose",
+      "pick"
+    ];
+    for (const keyword of browserKeywords) {
+      if (normalized.includes(keyword)) {
+        return true;
+      }
+    }
+    if (/https?:\/\/|www\.|\.com|\.org|\.io|\.net/.test(normalized)) {
+      return true;
+    }
+    const formPhrases = [
+      "form",
+      "application",
+      "apply",
+      "this page",
+      "this site",
+      "this website",
+      "on the page",
+      "on this page",
+      "the button",
+      "the link",
+      "the field",
+      "the input"
+    ];
+    for (const phrase of formPhrases) {
+      if (normalized.includes(phrase)) {
+        return true;
+      }
+    }
+    return false;
   }
   /**
    * Route a transcript to the appropriate capability
@@ -4625,8 +5153,8 @@ class IntentService {
     if (isSpecialIntent(intent)) {
       return this.handleSpecialIntent(classification);
     }
-    if (isAutomationIntent(intent)) {
-      return this.handleAutomationIntent(classification);
+    if (isAutomationIntent(intent) || this.isBrowserTask(transcript)) {
+      return this.handleBrowserIntent(classification);
     }
     if (isCodeIntent(intent)) {
       return this.handleCodeIntent(classification);
@@ -4648,20 +5176,23 @@ class IntentService {
   /**
    * Handle LLM-powered transforms
    * Routes any command through the LLM to transform clipboard content
+   * Also handles chart generation requests
    */
   async handleLLMTransform(classification) {
     const { intent } = classification;
     const command = classification.rawTranscript;
-    const job = jobManager.createJob("llm-transform", {
+    const isChartRequest = chartRendererService.isChartRequest(command);
+    const jobType = isChartRequest ? "chart-render" : "llm-transform";
+    const job = jobManager.createJob(jobType, {
       command,
       intent
     });
-    console.log(`[IntentService] Created LLM transform job ${job.id} for command: "${command}"`);
+    console.log(`[IntentService] Created ${jobType} job ${job.id} for command: "${command}"`);
     const isAvailable = await llmTransformService.isAvailable();
     if (!isAvailable) {
       const error = "OpenAI API key not configured. Set it in Settings.";
       jobManager.failJob(job.id, { code: "TRANSFORM_NOT_AVAILABLE", message: error });
-      this.updateLastAction(command, "llm-transform", false, job.id, error);
+      this.updateLastAction(command, jobType, false, job.id, error);
       return {
         intent,
         classification,
@@ -4676,7 +5207,7 @@ class IntentService {
     if (!clipboardText || !snapshot) {
       const error = "Clipboard is empty";
       jobManager.failJob(job.id, { code: "TRANSFORM_INVALID_INPUT", message: error });
-      this.updateLastAction(command, "llm-transform", false, job.id, error);
+      this.updateLastAction(command, jobType, false, job.id, error);
       return {
         intent,
         classification,
@@ -4685,10 +5216,24 @@ class IntentService {
         error
       };
     }
-    const result = await llmTransformService.transform(command, clipboardText);
+    if (isChartRequest) {
+      return this.handleChartRequest(command, clipboardText, snapshot, job.id, intent, classification);
+    }
+    const startTime = Date.now();
+    const result = await llmTransformService.transform(command, clipboardText, snapshot.html);
     if (!result.success) {
       jobManager.failJob(job.id, { code: "TRANSFORM_EXECUTION_FAILED", message: result.error || "Transform failed" });
       this.updateLastAction(command, "llm-transform", false, job.id, result.error);
+      storeService.addOperation({
+        id: job.id,
+        command,
+        jobType: "llm-transform",
+        inputText: clipboardText,
+        inputHtml: snapshot.html,
+        success: false,
+        error: result.error,
+        durationMs: Date.now() - startTime
+      });
       return {
         intent,
         classification,
@@ -4704,6 +5249,17 @@ class IntentService {
         message: writeResult.error.message
       });
       this.updateLastAction(command, "llm-transform", false, job.id, writeResult.error.message);
+      storeService.addOperation({
+        id: job.id,
+        command,
+        jobType: "llm-transform",
+        inputText: clipboardText,
+        inputHtml: snapshot.html,
+        outputText: result.output,
+        success: false,
+        error: writeResult.error.message,
+        durationMs: Date.now() - startTime
+      });
       return {
         intent,
         classification,
@@ -4714,6 +5270,16 @@ class IntentService {
     }
     jobManager.completeJob(job.id, { output: result.output });
     this.updateLastAction(command, "llm-transform", true, job.id);
+    storeService.addOperation({
+      id: job.id,
+      command,
+      jobType: "llm-transform",
+      inputText: clipboardText,
+      inputHtml: snapshot.html,
+      outputText: result.output,
+      success: true,
+      durationMs: Date.now() - startTime
+    });
     console.log(`[IntentService] LLM transform completed for job ${job.id}`);
     return {
       intent,
@@ -4721,6 +5287,106 @@ class IntentService {
       handled: true,
       jobId: job.id
     };
+  }
+  /**
+   * Handle chart generation requests
+   * Renders table data to a chart image and copies to clipboard
+   */
+  async handleChartRequest(command, clipboardText, snapshot, jobId, intent, classification) {
+    console.log(`[IntentService] Processing chart request: "${command}"`);
+    const startTime = Date.now();
+    try {
+      const chartResult = await chartRendererService.createChartFromTable(
+        command,
+        clipboardText,
+        snapshot.html
+      );
+      if (!chartResult.success || !chartResult.imageBuffer) {
+        const error = chartResult.error || "Failed to generate chart";
+        jobManager.failJob(jobId, { code: "CHART_RENDER_FAILED", message: error });
+        this.updateLastAction(command, "chart-render", false, jobId, error);
+        storeService.addOperation({
+          id: jobId,
+          command,
+          jobType: "chart-render",
+          inputText: clipboardText,
+          inputHtml: snapshot.html,
+          success: false,
+          error,
+          durationMs: Date.now() - startTime
+        });
+        return {
+          intent,
+          classification,
+          handled: false,
+          jobId,
+          error
+        };
+      }
+      const imagePath = this.saveChartImage(chartResult.imageBuffer, jobId);
+      console.log(`[IntentService] Chart image saved to ${imagePath}`);
+      const writeResult = clipboardService.writeImageGated(chartResult.imageBuffer, snapshot.id);
+      if (!writeResult.success) {
+        jobManager.failJob(jobId, {
+          code: writeResult.error.code,
+          message: writeResult.error.message
+        });
+        this.updateLastAction(command, "chart-render", false, jobId, writeResult.error.message);
+        storeService.addOperation({
+          id: jobId,
+          command,
+          jobType: "chart-render",
+          inputText: clipboardText,
+          inputHtml: snapshot.html,
+          outputImageSize: chartResult.imageBuffer.length,
+          outputImagePath: imagePath,
+          success: false,
+          error: writeResult.error.message,
+          durationMs: Date.now() - startTime
+        });
+        return {
+          intent,
+          classification,
+          handled: false,
+          jobId,
+          error: writeResult.error.message
+        };
+      }
+      jobManager.completeJob(jobId, {
+        chartType: chartResult.chartConfig?.type,
+        imageSize: chartResult.imageBuffer.length
+      });
+      this.updateLastAction(command, "chart-render", true, jobId);
+      storeService.addOperation({
+        id: jobId,
+        command,
+        jobType: "chart-render",
+        inputText: clipboardText,
+        inputHtml: snapshot.html,
+        outputImageSize: chartResult.imageBuffer.length,
+        outputImagePath: imagePath,
+        success: true,
+        durationMs: Date.now() - startTime
+      });
+      console.log(`[IntentService] Chart rendered and copied to clipboard (${chartResult.chartConfig?.type}, ${chartResult.imageBuffer.length} bytes)`);
+      return {
+        intent,
+        classification,
+        handled: true,
+        jobId
+      };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      jobManager.failJob(jobId, { code: "CHART_RENDER_FAILED", message: errorMsg });
+      this.updateLastAction(command, "chart-render", false, jobId, errorMsg);
+      return {
+        intent,
+        classification,
+        handled: false,
+        jobId,
+        error: errorMsg
+      };
+    }
   }
   /**
    * Handle special intents (cancel, undo)
@@ -4782,26 +5448,76 @@ class IntentService {
     };
   }
   /**
-   * Handle automation intents
+   * Handle automation/browser intents using the Browser Agent
    */
-  handleAutomationIntent(classification) {
+  async handleBrowserIntent(classification) {
     const { intent } = classification;
+    const task = classification.rawTranscript;
     const clipboardText = clipboardService.readClipboard();
-    const job = automationService.startJob({
-      type: "portal",
-      context: {
-        intent,
-        transcript: classification.rawTranscript,
-        clipboardContent: clipboardText
+    let resumeText = clipboardText || void 0;
+    let documentFilePath;
+    const copiedFilePaths = clipboardService.readFilePaths();
+    if (copiedFilePaths.length > 0) {
+      for (const filePath of copiedFilePaths) {
+        const extraction = await documentExtractorService.extractFromClipboard(filePath);
+        if (extraction.isDocument) {
+          console.log(`[IntentService] Found copied document file: ${extraction.filePath}`);
+          resumeText = extraction.text;
+          documentFilePath = extraction.filePath;
+          break;
+        }
       }
+    }
+    if (!documentFilePath && clipboardText) {
+      const extraction = await documentExtractorService.extractFromClipboard(clipboardText);
+      if (extraction.isDocument) {
+        console.log(`[IntentService] Extracted ${extraction.text.length} chars from ${extraction.fileType}: ${extraction.filePath}`);
+        resumeText = extraction.text;
+        documentFilePath = extraction.filePath;
+      }
+    }
+    const urlMatch = clipboardText?.match(/https?:\/\/[^\s]+/);
+    const startUrl = urlMatch ? urlMatch[0] : void 0;
+    console.log(`[IntentService] Starting browser agent for task: "${task}"`);
+    if (startUrl) {
+      console.log(`[IntentService] Using start URL from clipboard: ${startUrl}`);
+    }
+    if (documentFilePath) {
+      console.log(`[IntentService] Using document file for uploads: ${documentFilePath}`);
+    }
+    const isAvailable = await browserAgentService.isAvailable();
+    if (!isAvailable) {
+      const error = "OpenAI API key not configured. Set it in Settings.";
+      this.updateLastAction(task, "browser-agent", false, void 0, error);
+      return {
+        intent,
+        classification,
+        handled: false,
+        error
+      };
+    }
+    browserAgentService.runTask(task, {
+      resumeText,
+      startUrl,
+      documentFilePath
+    }).then((result) => {
+      console.log(`[IntentService] Browser agent completed:`, result);
+      this.updateLastAction(
+        task,
+        "browser-agent",
+        result.success,
+        void 0,
+        result.error || result.reason
+      );
+    }).catch((error) => {
+      console.error(`[IntentService] Browser agent error:`, error);
+      this.updateLastAction(task, "browser-agent", false, void 0, error.message);
     });
-    console.log(`[IntentService] Started automation job ${job.id} for intent ${intent}`);
-    this.updateLastAction(classification.rawTranscript, intent, true, job.id);
+    this.updateLastAction(task, "browser-agent", true);
     return {
       intent,
       classification,
-      handled: true,
-      jobId: job.id
+      handled: true
     };
   }
   /**
@@ -6269,6 +6985,826 @@ class TransformService {
   }
 }
 const transformService = new TransformService();
+function generateSnapshotId() {
+  return `snap-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+}
+function generateRef(index) {
+  return `e${index}`;
+}
+async function takeSnapshot(page) {
+  const snapshotId = generateSnapshotId();
+  const url = page.url();
+  const title = await page.title();
+  const elements = await page.evaluate(() => {
+    const results = [];
+    const selectors = [
+      "a",
+      "button",
+      "input",
+      "select",
+      "textarea",
+      '[role="button"]',
+      '[role="link"]',
+      '[role="textbox"]',
+      '[role="combobox"]',
+      '[role="checkbox"]',
+      '[role="radio"]',
+      '[role="menuitem"]',
+      '[role="tab"]',
+      "[onclick]",
+      "[tabindex]"
+    ];
+    const allElements = document.querySelectorAll(selectors.join(","));
+    allElements.forEach((el) => {
+      const htmlEl = el;
+      const rect = htmlEl.getBoundingClientRect();
+      const style = window.getComputedStyle(htmlEl);
+      const isVisible = style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0" && rect.width > 0 && rect.height > 0;
+      if (!isVisible) return;
+      let role = htmlEl.getAttribute("role") || "";
+      if (!role) {
+        const tagName = htmlEl.tagName.toLowerCase();
+        if (tagName === "a") role = "link";
+        else if (tagName === "button") role = "button";
+        else if (tagName === "input") {
+          const type = htmlEl.type;
+          if (type === "submit" || type === "button") role = "button";
+          else if (type === "checkbox") role = "checkbox";
+          else if (type === "radio") role = "radio";
+          else role = "textbox";
+        } else if (tagName === "select") role = "combobox";
+        else if (tagName === "textarea") role = "textbox";
+        else role = "generic";
+      }
+      const name = htmlEl.getAttribute("aria-label") || htmlEl.getAttribute("title") || htmlEl.placeholder || "";
+      const text = (htmlEl.textContent || "").trim().substring(0, 100);
+      const value = htmlEl.value || "";
+      const href = htmlEl.href || "";
+      const placeholder = htmlEl.placeholder || "";
+      const isEditable = htmlEl.tagName.toLowerCase() === "input" || htmlEl.tagName.toLowerCase() === "textarea" || htmlEl.tagName.toLowerCase() === "select" || htmlEl.isContentEditable;
+      const isClickable = htmlEl.tagName.toLowerCase() === "a" || htmlEl.tagName.toLowerCase() === "button" || role === "button" || role === "link" || !!htmlEl.onclick || style.cursor === "pointer";
+      results.push({
+        tagName: htmlEl.tagName.toLowerCase(),
+        role,
+        name,
+        text,
+        value,
+        href,
+        placeholder,
+        isEditable,
+        isClickable,
+        isVisible,
+        rect: isVisible ? rect : null
+      });
+    });
+    return results;
+  });
+  const elementRefs = elements.map((el, index) => ({
+    ref: generateRef(index),
+    role: el.role,
+    name: el.name || void 0,
+    tagName: el.tagName,
+    text: el.text || void 0,
+    value: el.value || void 0,
+    href: el.href || void 0,
+    placeholder: el.placeholder || void 0,
+    isEditable: el.isEditable,
+    isClickable: el.isClickable,
+    isVisible: el.isVisible,
+    boundingBox: el.rect ? {
+      x: el.rect.x,
+      y: el.rect.y,
+      width: el.rect.width,
+      height: el.rect.height
+    } : void 0
+  }));
+  const formFields = elementRefs.filter((e) => e.isEditable);
+  const buttons = elementRefs.filter((e) => e.role === "button" || e.tagName === "button");
+  const links = elementRefs.filter((e) => e.role === "link" || e.tagName === "a");
+  return {
+    id: snapshotId,
+    url,
+    title,
+    timestamp: Date.now(),
+    elements: elementRefs,
+    formFields,
+    buttons,
+    links
+  };
+}
+const ACTION_SCHEMAS = {
+  click: { requiredFields: ["ref"], optionalFields: ["description"] },
+  fill: { requiredFields: ["ref", "value"], optionalFields: ["description"] },
+  select: { requiredFields: ["ref", "value"], optionalFields: ["description"] },
+  press: { requiredFields: ["key"], optionalFields: ["ref", "description"] },
+  scroll: { requiredFields: [], optionalFields: ["ref", "description"] },
+  navigate: { requiredFields: ["url"], optionalFields: ["description"] },
+  wait: { requiredFields: ["duration"], optionalFields: ["description"] }
+};
+function validateAction(action) {
+  const schema = ACTION_SCHEMAS[action.type];
+  if (!schema) {
+    return { valid: false, error: `Unknown action type: ${action.type}` };
+  }
+  for (const field of schema.requiredFields) {
+    if (!(field in action) || action[field] === void 0) {
+      return { valid: false, error: `Missing required field: ${field} for action ${action.type}` };
+    }
+  }
+  return { valid: true };
+}
+function validateActions(actions) {
+  const errors = [];
+  for (let i = 0; i < actions.length; i++) {
+    const result = validateAction(actions[i]);
+    if (!result.valid) {
+      errors.push(`Action ${i}: ${result.error}`);
+    }
+  }
+  return { valid: errors.length === 0, errors };
+}
+async function getLocatorForRef(page, snapshot, ref) {
+  const element = snapshot.elements.find((e) => e.ref === ref);
+  if (!element) {
+    return { locator: null, element: null };
+  }
+  let locator = null;
+  if (element.role && element.name) {
+    locator = page.getByRole(element.role, {
+      name: element.name
+    });
+  } else if (element.placeholder) {
+    locator = page.getByPlaceholder(element.placeholder);
+  } else if (element.text) {
+    locator = page.getByText(element.text.substring(0, 50));
+  } else if (element.href && element.tagName === "a") {
+    locator = page.locator(`a[href="${element.href}"]`);
+  }
+  if (!locator && element.boundingBox) {
+    return { locator: null, element };
+  }
+  return { locator, element };
+}
+async function executeAction(page, snapshot, action) {
+  const timestamp = Date.now();
+  const validation = validateAction(action);
+  if (!validation.valid) {
+    return {
+      success: false,
+      action,
+      error: validation.error,
+      timestamp
+    };
+  }
+  try {
+    switch (action.type) {
+      case "click": {
+        const { locator, element } = await getLocatorForRef(page, snapshot, action.ref);
+        if (locator) {
+          await locator.click({ timeout: 5e3 });
+        } else if (element?.boundingBox) {
+          const { x, y, width, height } = element.boundingBox;
+          await page.mouse.click(x + width / 2, y + height / 2);
+        } else {
+          return {
+            success: false,
+            action,
+            error: `Element not found: ${action.ref}`,
+            timestamp
+          };
+        }
+        break;
+      }
+      case "fill": {
+        const { locator, element } = await getLocatorForRef(page, snapshot, action.ref);
+        if (locator) {
+          await locator.fill(action.value, { timeout: 5e3 });
+        } else if (element?.boundingBox) {
+          const { x, y, width, height } = element.boundingBox;
+          await page.mouse.click(x + width / 2, y + height / 2);
+          await page.keyboard.type(action.value);
+        } else {
+          return {
+            success: false,
+            action,
+            error: `Element not found: ${action.ref}`,
+            timestamp
+          };
+        }
+        break;
+      }
+      case "select": {
+        const { locator } = await getLocatorForRef(page, snapshot, action.ref);
+        if (locator) {
+          await locator.selectOption(action.value, { timeout: 5e3 });
+        } else {
+          return {
+            success: false,
+            action,
+            error: `Element not found: ${action.ref}`,
+            timestamp
+          };
+        }
+        break;
+      }
+      case "press": {
+        if (action.ref) {
+          const { locator } = await getLocatorForRef(page, snapshot, action.ref);
+          if (locator) {
+            await locator.press(action.key, { timeout: 5e3 });
+          } else {
+            return {
+              success: false,
+              action,
+              error: `Element not found: ${action.ref}`,
+              timestamp
+            };
+          }
+        } else {
+          await page.keyboard.press(action.key);
+        }
+        break;
+      }
+      case "scroll": {
+        if (action.ref) {
+          const { locator } = await getLocatorForRef(page, snapshot, action.ref);
+          if (locator) {
+            await locator.scrollIntoViewIfNeeded({ timeout: 5e3 });
+          }
+        } else {
+          await page.evaluate(() => window.scrollBy(0, 300));
+        }
+        break;
+      }
+      case "navigate": {
+        await page.goto(action.url, { timeout: 3e4, waitUntil: "domcontentloaded" });
+        break;
+      }
+      case "wait": {
+        await page.waitForTimeout(action.duration);
+        break;
+      }
+      default:
+        return {
+          success: false,
+          action,
+          error: `Unknown action type: ${action.type}`,
+          timestamp
+        };
+    }
+    return { success: true, action, timestamp };
+  } catch (error) {
+    return {
+      success: false,
+      action,
+      error: error instanceof Error ? error.message : String(error),
+      timestamp
+    };
+  }
+}
+async function executeActions(page, snapshot, actions) {
+  const results = [];
+  for (const action of actions) {
+    const result = await executeAction(page, snapshot, action);
+    results.push(result);
+    if (!result.success) {
+      break;
+    }
+    await page.waitForTimeout(100);
+  }
+  return results;
+}
+const DEFAULT_CONFIG = {
+  maxIterations: 50,
+  timeout: 12e4,
+  // 2 minutes
+  headless: false,
+  // Show browser for debugging
+  userDataDir: ""
+};
+function detectNeedsInput(snapshot) {
+  const url = snapshot.url.toLowerCase();
+  const title = snapshot.title.toLowerCase();
+  const loginIndicators = ["login", "sign in", "signin", "log in", "authenticate"];
+  const hasLoginIndicator = loginIndicators.some((i) => url.includes(i) || title.includes(i)) || snapshot.formFields.some(
+    (f) => f.name?.toLowerCase().includes("password") || f.placeholder?.toLowerCase().includes("password")
+  );
+  if (hasLoginIndicator) {
+    return {
+      needsInput: true,
+      reason: "login",
+      message: "Login required. Please log in and then continue."
+    };
+  }
+  const captchaIndicators = ["captcha", "recaptcha", "hcaptcha", "verify you are human"];
+  const hasCaptcha = captchaIndicators.some((i) => title.includes(i)) || snapshot.elements.some((e) => e.text?.toLowerCase().includes("captcha"));
+  if (hasCaptcha) {
+    return {
+      needsInput: true,
+      reason: "captcha",
+      message: "CAPTCHA detected. Please solve it and then continue."
+    };
+  }
+  return { needsInput: false };
+}
+class AutomationLoop {
+  constructor(config = {}) {
+    this.browser = null;
+    this.context = null;
+    this.page = null;
+    this.state = "running";
+    this.iteration = 0;
+    this.lastSnapshot = null;
+    this.config = { ...DEFAULT_CONFIG, ...config };
+  }
+  /**
+   * Initialize the browser
+   */
+  async initialize() {
+    this.browser = await playwright.chromium.launch({
+      headless: this.config.headless
+    });
+    const contextOptions = {
+      viewport: { width: 1280, height: 800 }
+    };
+    if (this.config.userDataDir) {
+      this.context = await playwright.chromium.launchPersistentContext(this.config.userDataDir, {
+        headless: this.config.headless,
+        viewport: { width: 1280, height: 800 }
+      });
+      this.page = this.context.pages()[0] || await this.context.newPage();
+    } else {
+      this.context = await this.browser.newContext(contextOptions);
+      this.page = await this.context.newPage();
+    }
+  }
+  /**
+   * Navigate to a URL
+   */
+  async navigateTo(url) {
+    if (!this.page) throw new Error("Browser not initialized");
+    await this.page.goto(url, {
+      timeout: 3e4,
+      waitUntil: "domcontentloaded"
+    });
+    await this.page.waitForLoadState("networkidle", { timeout: 1e4 }).catch(() => {
+    });
+    this.lastSnapshot = await takeSnapshot(this.page);
+    return this.lastSnapshot;
+  }
+  /**
+   * Get the current page snapshot
+   */
+  async getSnapshot() {
+    if (!this.page) throw new Error("Browser not initialized");
+    this.lastSnapshot = await takeSnapshot(this.page);
+    return this.lastSnapshot;
+  }
+  /**
+   * Run a single iteration of the loop
+   */
+  async runIteration(decider) {
+    if (!this.page) throw new Error("Browser not initialized");
+    this.iteration++;
+    const snapshot = await this.getSnapshot();
+    const needsInputCheck = detectNeedsInput(snapshot);
+    if (needsInputCheck.needsInput) {
+      this.state = "needs_input";
+      return {
+        state: "needs_input",
+        snapshot,
+        actionsExecuted: [],
+        needsInputReason: needsInputCheck.reason,
+        needsInputMessage: needsInputCheck.message
+      };
+    }
+    const decision = await decider(snapshot, this.iteration);
+    if ("state" in decision) {
+      if (decision.state === "completed") {
+        this.state = "completed";
+        return {
+          state: "completed",
+          snapshot,
+          actionsExecuted: []
+        };
+      }
+      if (decision.state === "needs_input") {
+        this.state = "needs_input";
+        return {
+          state: "needs_input",
+          snapshot,
+          actionsExecuted: [],
+          needsInputReason: decision.reason,
+          needsInputMessage: decision.message
+        };
+      }
+      if (decision.state === "failed") {
+        this.state = "failed";
+        return {
+          state: "failed",
+          snapshot,
+          actionsExecuted: [],
+          error: decision.error
+        };
+      }
+    }
+    const actions = decision.actions;
+    const validation = validateActions(actions);
+    if (!validation.valid) {
+      return {
+        state: "running",
+        snapshot,
+        actionsExecuted: [],
+        error: `Invalid actions: ${validation.errors.join(", ")}`
+      };
+    }
+    const results = await executeActions(this.page, snapshot, actions);
+    const failedAction = results.find((r) => !r.success);
+    if (failedAction) {
+      return {
+        state: "running",
+        snapshot,
+        actionsExecuted: results,
+        error: failedAction.error
+      };
+    }
+    return {
+      state: "running",
+      snapshot,
+      actionsExecuted: results
+    };
+  }
+  /**
+   * Run the full automation loop until completion or terminal state
+   */
+  async run(startUrl, decider, onIteration) {
+    await this.initialize();
+    await this.navigateTo(startUrl);
+    const startTime = Date.now();
+    while (this.state === "running" && this.iteration < this.config.maxIterations && Date.now() - startTime < this.config.timeout) {
+      const result = await this.runIteration(decider);
+      if (onIteration) {
+        onIteration(result);
+      }
+      if (result.state !== "running") {
+        return result;
+      }
+      await this.page?.waitForTimeout(500);
+    }
+    if (this.iteration >= this.config.maxIterations) {
+      this.state = "failed";
+      return {
+        state: "failed",
+        snapshot: this.lastSnapshot,
+        actionsExecuted: [],
+        error: `Max iterations (${this.config.maxIterations}) reached`
+      };
+    }
+    if (Date.now() - startTime >= this.config.timeout) {
+      this.state = "failed";
+      return {
+        state: "failed",
+        snapshot: this.lastSnapshot,
+        actionsExecuted: [],
+        error: `Timeout (${this.config.timeout}ms) reached`
+      };
+    }
+    return {
+      state: this.state,
+      snapshot: this.lastSnapshot,
+      actionsExecuted: []
+    };
+  }
+  /**
+   * Resume from needs_input state
+   */
+  async resume() {
+    if (this.state !== "needs_input") {
+      throw new Error("Cannot resume: not in needs_input state");
+    }
+    this.state = "running";
+  }
+  /**
+   * Cancel the automation
+   */
+  cancel() {
+    this.state = "cancelled";
+  }
+  /**
+   * Get current state
+   */
+  getState() {
+    return this.state;
+  }
+  /**
+   * Get current iteration count
+   */
+  getIteration() {
+    return this.iteration;
+  }
+  /**
+   * Cleanup resources
+   */
+  async cleanup() {
+    if (this.page) {
+      await this.page.close().catch(() => {
+      });
+    }
+    if (this.context) {
+      await this.context.close().catch(() => {
+      });
+    }
+    if (this.browser) {
+      await this.browser.close().catch(() => {
+      });
+    }
+    this.page = null;
+    this.context = null;
+    this.browser = null;
+  }
+}
+const MAX_RECENT_JOBS = 10;
+class AutomationService {
+  activeJob = null;
+  recentJobs = [];
+  eventEmitter = null;
+  jobCounter = 0;
+  activeLoop = null;
+  /**
+   * Set the event emitter for broadcasting automation events
+   */
+  setEventEmitter(emitter) {
+    this.eventEmitter = emitter;
+  }
+  /**
+   * Emit an automation event
+   */
+  emitEvent(type, job, previousStatus) {
+    if (this.eventEmitter) {
+      this.eventEmitter(
+        createEvent(type, { job, previousStatus }, job.id)
+      );
+    }
+  }
+  /**
+   * Generate a unique automation job ID
+   */
+  generateJobId() {
+    this.jobCounter++;
+    return `auto-${Date.now()}-${this.jobCounter}`;
+  }
+  /**
+   * Create and start a new automation job
+   */
+  startJob(request) {
+    if (this.activeJob && !this.isTerminal(this.activeJob.status)) {
+      this.cancelJob(this.activeJob.id);
+    }
+    const now = Date.now();
+    const job = {
+      id: this.generateJobId(),
+      type: request.type,
+      status: "pending",
+      createdAt: now,
+      updatedAt: now,
+      targetUrl: request.targetUrl,
+      input: request.context,
+      stepCount: 0
+    };
+    this.activeJob = job;
+    const baseJob = jobManager.createJob(request.type, request.context);
+    job.id = baseJob.id;
+    this.emitEvent(EventTypes.AUTOMATION_STARTED, job);
+    this.transitionJob(job.id, "running");
+    return job;
+  }
+  /**
+   * Get the current automation state
+   */
+  getState() {
+    return {
+      activeJob: this.activeJob,
+      recentJobs: [...this.recentJobs]
+    };
+  }
+  /**
+   * Get a job by ID
+   */
+  getJob(id) {
+    if (this.activeJob?.id === id) {
+      return this.activeJob;
+    }
+    return this.recentJobs.find((j) => j.id === id) ?? null;
+  }
+  /**
+   * Check if a status is terminal
+   */
+  isTerminal(status) {
+    return ["completed", "failed", "cancelled"].includes(status);
+  }
+  /**
+   * Transition a job to a new status
+   */
+  transitionJob(id, newStatus, options) {
+    const job = this.getJob(id);
+    if (!job) return false;
+    const success = jobManager.transitionJob(id, newStatus, {
+      output: options?.output,
+      error: options?.error
+    });
+    if (!success) return false;
+    const previousStatus = job.status;
+    job.status = newStatus;
+    job.updatedAt = Date.now();
+    if (options?.output !== void 0) {
+      job.output = options.output;
+    }
+    if (options?.error !== void 0) {
+      job.error = options.error;
+    }
+    if (options?.currentStep !== void 0) {
+      job.currentStep = options.currentStep;
+      job.stepCount = (job.stepCount ?? 0) + 1;
+    }
+    if (options?.needsInputReason !== void 0) {
+      job.needsInputReason = options.needsInputReason;
+    }
+    if (options?.needsInputMessage !== void 0) {
+      job.needsInputMessage = options.needsInputMessage;
+    }
+    switch (newStatus) {
+      case "running":
+        if (options?.currentStep) {
+          this.emitEvent(EventTypes.AUTOMATION_STEP, job, previousStatus);
+        }
+        break;
+      case "completed":
+        this.emitEvent(EventTypes.AUTOMATION_COMPLETED, job, previousStatus);
+        this.moveToRecent(job);
+        break;
+      case "failed":
+        this.emitEvent(EventTypes.AUTOMATION_FAILED, job, previousStatus);
+        this.moveToRecent(job);
+        break;
+      case "cancelled":
+        this.emitEvent(EventTypes.AUTOMATION_CANCELLED, job, previousStatus);
+        this.moveToRecent(job);
+        break;
+      case "needs_input":
+        this.emitEvent(EventTypes.AUTOMATION_NEEDS_INPUT, job, previousStatus);
+        break;
+    }
+    return true;
+  }
+  /**
+   * Move a job from active to recent
+   */
+  moveToRecent(job) {
+    if (this.activeJob?.id === job.id) {
+      this.activeJob = null;
+    }
+    this.recentJobs.unshift(job);
+    if (this.recentJobs.length > MAX_RECENT_JOBS) {
+      this.recentJobs.pop();
+    }
+  }
+  /**
+   * Update the current step of a running job
+   */
+  updateStep(id, step) {
+    const job = this.getJob(id);
+    if (!job || job.status !== "running") return false;
+    job.currentStep = step;
+    job.stepCount = (job.stepCount ?? 0) + 1;
+    job.updatedAt = Date.now();
+    this.emitEvent(EventTypes.AUTOMATION_STEP, job);
+    return true;
+  }
+  /**
+   * Mark a job as needing user input
+   */
+  needsInput(id, reason, message) {
+    return this.transitionJob(id, "needs_input", {
+      needsInputReason: reason,
+      needsInputMessage: message
+    });
+  }
+  /**
+   * Resume a job from needs_input state
+   */
+  resumeJob(id, input) {
+    const job = this.getJob(id);
+    if (!job || job.status !== "needs_input") return false;
+    job.needsInputReason = void 0;
+    job.needsInputMessage = void 0;
+    if (input !== void 0) {
+      job.input = { ...job.input, userInput: input };
+    }
+    return this.transitionJob(id, "running");
+  }
+  /**
+   * Complete a job successfully
+   */
+  completeJob(id, output) {
+    return this.transitionJob(id, "completed", { output });
+  }
+  /**
+   * Fail a job with an error
+   */
+  failJob(id, error) {
+    return this.transitionJob(id, "failed", { error });
+  }
+  /**
+   * Cancel a job
+   */
+  cancelJob(id) {
+    const job = this.getJob(id);
+    if (!job || this.isTerminal(job.status)) return false;
+    return this.transitionJob(id, "cancelled");
+  }
+  /**
+   * Get the active job (if any)
+   */
+  getActiveJob() {
+    return this.activeJob;
+  }
+  /**
+   * Check if there's an active (non-terminal) job
+   */
+  hasActiveJob() {
+    return this.activeJob !== null && !this.isTerminal(this.activeJob.status);
+  }
+  /**
+   * Clear all jobs (for testing)
+   */
+  clear() {
+    this.activeJob = null;
+    this.recentJobs = [];
+    this.jobCounter = 0;
+    this.activeLoop = null;
+  }
+  /**
+   * Run the automation loop for a job
+   * This is the core snapshot → decide → execute → resnapshot loop
+   */
+  async runAutomationLoop(jobId, startUrl, decider) {
+    const job = this.getJob(jobId);
+    if (!job || job.status !== "running") {
+      console.error(`[AutomationService] Cannot run loop: job ${jobId} not in running state`);
+      return;
+    }
+    this.activeLoop = new AutomationLoop({
+      maxIterations: 50,
+      timeout: 12e4,
+      // 2 minutes (NFR3 target)
+      headless: false
+      // Show browser for MVP
+    });
+    try {
+      const result = await this.activeLoop.run(
+        startUrl,
+        decider,
+        (iterationResult) => {
+          if (iterationResult.actionsExecuted.length > 0) {
+            const lastAction = iterationResult.actionsExecuted[iterationResult.actionsExecuted.length - 1];
+            this.updateStep(jobId, lastAction.action.description || lastAction.action.type);
+          }
+          if (iterationResult.state === "needs_input") {
+            this.needsInput(
+              jobId,
+              iterationResult.needsInputReason || "other",
+              iterationResult.needsInputMessage
+            );
+          }
+        }
+      );
+      if (result.state === "completed") {
+        this.completeJob(jobId, { url: result.snapshot.url });
+      } else if (result.state === "failed") {
+        this.failJob(jobId, {
+          code: "AUTOMATION_BROWSER_ERROR",
+          message: result.error || "Automation failed"
+        });
+      } else if (result.state === "cancelled") {
+      }
+    } catch (error) {
+      this.failJob(jobId, {
+        code: "AUTOMATION_BROWSER_ERROR",
+        message: error instanceof Error ? error.message : String(error)
+      });
+    } finally {
+      await this.activeLoop.cleanup();
+      this.activeLoop = null;
+    }
+  }
+  /**
+   * Get the active automation loop (for testing)
+   */
+  getActiveLoop() {
+    return this.activeLoop;
+  }
+}
+const automationService = new AutomationService();
 let mainWindow = null;
 let tray = null;
 exports.appStatus = "idle";
@@ -6292,7 +7828,7 @@ function setAppStatus(newStatus) {
   }
 }
 const COMPACT_SIZE = { width: 300, height: 44 };
-const EXPANDED_SIZE = { width: 500, height: 480 };
+const EXPANDED_SIZE = { width: 700, height: 600 };
 let isExpanded = false;
 function createWindow() {
   const primaryDisplay = electron.screen.getPrimaryDisplay();
@@ -6916,6 +8452,51 @@ User request: ${args.prompt}`;
   electron.ipcMain.handle(IpcChannels.SKILL_IMPORT, async (_event, args) => {
     const result = await skillService.import(args.source, args.global);
     return createSuccessResponse(result);
+  });
+  electron.ipcMain.handle(IpcChannels.HISTORY_GET, (_event, args) => {
+    const operations = storeService.getOperations(args?.limit ?? 50);
+    return createSuccessResponse({ operations });
+  });
+  electron.ipcMain.handle(IpcChannels.HISTORY_CLEAR, () => {
+    storeService.clearOperations();
+    return createSuccessResponse({ cleared: true });
+  });
+  electron.ipcMain.handle(IpcChannels.HISTORY_COPY_IMAGE, (_event, args) => {
+    try {
+      if (!args.imagePath || !fs.existsSync(args.imagePath)) {
+        return createErrorResponse({
+          code: ErrorCodes.INVALID_ARGS,
+          message: "Image file not found"
+        });
+      }
+      const imageBuffer = fs.readFileSync(args.imagePath);
+      const image = electron.nativeImage.createFromBuffer(imageBuffer);
+      electron.clipboard.writeImage(image);
+      return createSuccessResponse({ copied: true });
+    } catch (error) {
+      return createErrorResponse({
+        code: ErrorCodes.INTERNAL_ERROR,
+        message: error instanceof Error ? error.message : "Failed to copy image"
+      });
+    }
+  });
+  electron.ipcMain.handle(IpcChannels.HISTORY_GET_IMAGE, (_event, args) => {
+    try {
+      if (!args.imagePath || !fs.existsSync(args.imagePath)) {
+        return createErrorResponse({
+          code: ErrorCodes.INVALID_ARGS,
+          message: "Image file not found"
+        });
+      }
+      const imageBuffer = fs.readFileSync(args.imagePath);
+      const base64 = imageBuffer.toString("base64");
+      return createSuccessResponse({ base64, mimeType: "image/png" });
+    } catch (error) {
+      return createErrorResponse({
+        code: ErrorCodes.INTERNAL_ERROR,
+        message: error instanceof Error ? error.message : "Failed to read image"
+      });
+    }
   });
 }
 electron.app.whenReady().then(() => {

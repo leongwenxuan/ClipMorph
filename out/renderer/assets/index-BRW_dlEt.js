@@ -6981,6 +6981,12 @@ const EventTypes = {
   AUTOMATION_NEEDS_INPUT: "automation-needs-input",
   AUTOMATION_CANCELLED: "automation-cancelled"
 };
+const CEREBRAS_MODELS = [
+  { id: "llama3.1-8b", name: "Llama 3.1 8B", params: "8B", speed: "~2200 t/s" },
+  { id: "llama-3.3-70b", name: "Llama 3.3 70B", params: "70B", speed: "~2100 t/s" },
+  { id: "gpt-oss-120b", name: "OpenAI GPT OSS", params: "120B", speed: "~3000 t/s" },
+  { id: "qwen-3-32b", name: "Qwen 3 32B", params: "32B", speed: "~2600 t/s" }
+];
 const TRANSFORM_LABELS = {
   urlClean: "URL Clean",
   urlMarkdown: "URL to Markdown",
@@ -7005,6 +7011,12 @@ function Settings({ onClose }) {
   const [apiKeyInput, setApiKeyInput] = reactExports.useState("");
   const [apiKeyError, setApiKeyError] = reactExports.useState(null);
   const [apiKeySaving, setApiKeySaving] = reactExports.useState(false);
+  const [hasCerebrasKey, setHasCerebrasKey] = reactExports.useState(false);
+  const [maskedCerebrasKey, setMaskedCerebrasKey] = reactExports.useState(null);
+  const [editingCerebrasKey, setEditingCerebrasKey] = reactExports.useState(false);
+  const [cerebrasKeyInput, setCerebrasKeyInput] = reactExports.useState("");
+  const [cerebrasKeyError, setCerebrasKeyError] = reactExports.useState(null);
+  const [cerebrasKeySaving, setCerebrasKeySaving] = reactExports.useState(false);
   reactExports.useEffect(() => {
     const fetchSettings = async () => {
       try {
@@ -7016,6 +7028,11 @@ function Settings({ onClose }) {
         if (isIpcSuccess(secretResponse)) {
           setHasApiKey(secretResponse.data.hasValue);
           setMaskedApiKey(secretResponse.data.maskedValue || null);
+        }
+        const cerebrasResponse = await window.clipmorph.getSecret("cerebras-api-key");
+        if (isIpcSuccess(cerebrasResponse)) {
+          setHasCerebrasKey(cerebrasResponse.data.hasValue);
+          setMaskedCerebrasKey(cerebrasResponse.data.maskedValue || null);
         }
       } catch (err) {
         console.error("Failed to fetch settings:", err);
@@ -7185,6 +7202,69 @@ function Settings({ onClose }) {
       setApiKeySaving(false);
     }
   };
+  const handleEditCerebrasKey = () => {
+    setEditingCerebrasKey(true);
+    setCerebrasKeyInput("");
+    setCerebrasKeyError(null);
+  };
+  const handleCancelCerebrasKey = () => {
+    setEditingCerebrasKey(false);
+    setCerebrasKeyInput("");
+    setCerebrasKeyError(null);
+  };
+  const handleSaveCerebrasKey = async () => {
+    const trimmedKey = cerebrasKeyInput.trim();
+    if (!trimmedKey) {
+      setCerebrasKeyError("API key cannot be empty");
+      return;
+    }
+    if (!trimmedKey.startsWith("csk-")) {
+      setCerebrasKeyError('Cerebras API key should start with "csk-"');
+      return;
+    }
+    setCerebrasKeySaving(true);
+    setCerebrasKeyError(null);
+    try {
+      const response = await window.clipmorph.setSecret("cerebras-api-key", trimmedKey);
+      if (isIpcSuccess(response)) {
+        if (response.data.success) {
+          const secretResponse = await window.clipmorph.getSecret("cerebras-api-key");
+          if (isIpcSuccess(secretResponse)) {
+            setHasCerebrasKey(secretResponse.data.hasValue);
+            setMaskedCerebrasKey(secretResponse.data.maskedValue || null);
+          }
+          setEditingCerebrasKey(false);
+          setCerebrasKeyInput("");
+        } else {
+          setCerebrasKeyError("Failed to save API key");
+        }
+      } else {
+        setCerebrasKeyError(response.error.message);
+      }
+    } catch (err) {
+      setCerebrasKeyError("Failed to save API key");
+      console.error("Failed to save Cerebras API key:", err);
+    } finally {
+      setCerebrasKeySaving(false);
+    }
+  };
+  const handleDeleteCerebrasKey = async () => {
+    if (!confirm("Are you sure you want to delete your Cerebras API key?")) {
+      return;
+    }
+    setCerebrasKeySaving(true);
+    try {
+      const response = await window.clipmorph.deleteSecret("cerebras-api-key");
+      if (isIpcSuccess(response)) {
+        setHasCerebrasKey(false);
+        setMaskedCerebrasKey(null);
+      }
+    } catch (err) {
+      console.error("Failed to delete Cerebras API key:", err);
+    } finally {
+      setCerebrasKeySaving(false);
+    }
+  };
   if (loading) {
     return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "settings-overlay", children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "settings-panel", children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "settings-loading", children: "Loading settings..." }) }) });
   }
@@ -7201,10 +7281,68 @@ function Settings({ onClose }) {
     ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-content", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("section", { className: "settings-section", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { children: "API Key" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "settings-hint", children: "Required for voice transcription (stored securely in Keychain)" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { children: "API Keys" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "settings-hint", children: "Stored securely in macOS Keychain" }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "setting-row api-key-row", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { children: "OpenAI API Key" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { children: [
+            "Cerebras API Key ",
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "key-hint", children: "(Browser Agent - faster)" })
+          ] }),
+          editingCerebrasKey ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "api-key-editor", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "input",
+              {
+                type: "password",
+                className: "api-key-input",
+                value: cerebrasKeyInput,
+                onChange: (e) => setCerebrasKeyInput(e.target.value),
+                placeholder: "csk-...",
+                autoFocus: true
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "api-key-actions", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  className: "api-key-save-btn",
+                  onClick: handleSaveCerebrasKey,
+                  disabled: cerebrasKeySaving || !cerebrasKeyInput,
+                  children: cerebrasKeySaving ? "Saving..." : "Save"
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  className: "api-key-cancel-btn",
+                  onClick: handleCancelCerebrasKey,
+                  disabled: cerebrasKeySaving,
+                  children: "Cancel"
+                }
+              )
+            ] })
+          ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "api-key-display", children: hasCerebrasKey ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "api-key-masked", children: maskedCerebrasKey }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "api-key-edit-btn", onClick: handleEditCerebrasKey, children: "Change" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                className: "api-key-delete-btn",
+                onClick: handleDeleteCerebrasKey,
+                disabled: cerebrasKeySaving,
+                children: "Delete"
+              }
+            )
+          ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "api-key-missing", children: "Not configured" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "api-key-add-btn", onClick: handleEditCerebrasKey, children: "Add Key" })
+          ] }) })
+        ] }),
+        cerebrasKeyError && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "api-key-error", children: cerebrasKeyError }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "setting-row api-key-row", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { children: [
+            "OpenAI API Key ",
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "key-hint", children: "(Voice & Fallback)" })
+          ] }),
           editingApiKey ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "api-key-editor", children: [
             /* @__PURE__ */ jsxRuntimeExports.jsx(
               "input",
@@ -7255,6 +7393,32 @@ function Settings({ onClose }) {
           ] }) })
         ] }),
         apiKeyError && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "api-key-error", children: apiKeyError })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("section", { className: "settings-section", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { children: "Browser Agent Model" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "settings-hint", children: "Cerebras model for browser automation (requires Cerebras API key)" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "setting-row model-row", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { children: "Model" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "select",
+            {
+              className: "model-select",
+              value: settings["cerebras.model"] || "qwen-3-32b",
+              onChange: async (e) => {
+                const newModel = e.target.value;
+                setSettings((prev) => prev ? { ...prev, "cerebras.model": newModel } : null);
+                await window.clipmorph.setSetting("cerebras.model", newModel);
+              },
+              children: CEREBRAS_MODELS.map((model) => /* @__PURE__ */ jsxRuntimeExports.jsxs("option", { value: model.id, children: [
+                model.name,
+                " (",
+                model.params,
+                ") - ",
+                model.speed
+              ] }, model.id))
+            }
+          )
+        ] })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("section", { className: "settings-section", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { children: "Hotkey" }),
@@ -7330,84 +7494,240 @@ function Settings({ onClose }) {
     /* @__PURE__ */ jsxRuntimeExports.jsx("footer", { className: "settings-footer", children: /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "reset-btn", onClick: handleResetAll, disabled: saving, children: "Reset All" }) })
   ] }) });
 }
-function TranscriptHistory({ onClose }) {
-  const [transcripts, setTranscripts] = reactExports.useState([]);
+const imageCache = /* @__PURE__ */ new Map();
+function OperationsHistory({ onClose }) {
+  const [operations, setOperations] = reactExports.useState([]);
   const [loading, setLoading] = reactExports.useState(true);
-  const [clearing, setClearing] = reactExports.useState(false);
+  const [expandedId, setExpandedId] = reactExports.useState(null);
+  const [loadedImages, setLoadedImages] = reactExports.useState(/* @__PURE__ */ new Map());
+  const [copyingId, setCopyingId] = reactExports.useState(null);
   reactExports.useEffect(() => {
-    const fetchTranscripts = async () => {
-      try {
-        const response = await window.clipmorph.getTranscripts();
-        if (isIpcSuccess(response)) {
-          setTranscripts(response.data.transcripts);
-        }
-      } catch (err) {
-        console.error("Failed to fetch transcripts:", err);
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchTranscripts();
+    loadOperations();
   }, []);
-  const handleClear = async () => {
-    setClearing(true);
+  const loadOperations = async () => {
+    setLoading(true);
     try {
-      const response = await window.clipmorph.clearTranscripts();
-      if (isIpcSuccess(response)) {
-        setTranscripts([]);
+      const result = await window.clipmorph.getOperationsHistory(50);
+      if (isIpcSuccess(result) && result.data?.operations) {
+        setOperations(result.data.operations);
+      } else {
+        console.error("Failed to load operations:", result);
+        setOperations([]);
       }
     } catch (err) {
-      console.error("Failed to clear transcripts:", err);
+      console.error("Failed to load operations:", err);
+      setOperations([]);
     } finally {
-      setClearing(false);
+      setLoading(false);
+    }
+  };
+  const handleClear = async () => {
+    if (confirm("Clear all operations history?")) {
+      await window.clipmorph.clearOperationsHistory();
+      setOperations([]);
     }
   };
   const formatTime = (timestamp) => {
     const date = new Date(timestamp);
     const now = /* @__PURE__ */ new Date();
-    const isToday = date.toDateString() === now.toDateString();
-    if (isToday) {
-      return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    }
-    return date.toLocaleDateString([], { month: "short", day: "numeric" }) + " " + date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const diffMs = now.getTime() - date.getTime();
+    const diffMins = Math.floor(diffMs / 6e4);
+    const diffHours = Math.floor(diffMs / 36e5);
+    const diffDays = Math.floor(diffMs / 864e5);
+    if (diffMins < 1) return "Just now";
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffHours < 24) return `${diffHours}h ago`;
+    if (diffDays < 7) return `${diffDays}d ago`;
+    return date.toLocaleDateString();
   };
-  if (loading) {
-    return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "transcript-overlay", children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "transcript-panel", children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "transcript-loading", children: "Loading transcripts..." }) }) });
-  }
-  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "transcript-overlay", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "transcript-panel", children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("header", { className: "transcript-header", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { children: "Transcript History" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "transcript-close-btn", onClick: onClose, "aria-label": "Close", children: "×" })
-    ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "transcript-content", children: transcripts.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "transcript-empty", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "empty-icon", children: "📝" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: "No transcripts yet" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "empty-hint", children: "Use push-to-talk to record voice commands" })
-    ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("ul", { className: "transcript-list", children: transcripts.map((t2) => /* @__PURE__ */ jsxRuntimeExports.jsxs("li", { className: "transcript-item", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "transcript-text", children: t2.text }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "transcript-meta", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "transcript-time", children: formatTime(t2.timestamp) }),
-        t2.durationMs && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "transcript-duration", children: [
-          (t2.durationMs / 1e3).toFixed(1),
-          "s"
-        ] })
+  const truncate = (text, maxLen) => {
+    if (!text) return "(empty)";
+    if (text.length <= maxLen) return text;
+    return text.substring(0, maxLen) + "...";
+  };
+  const formatDuration = (ms) => {
+    if (ms < 1e3) return `${ms}ms`;
+    if (ms < 6e4) return `${(ms / 1e3).toFixed(1)}s`;
+    const mins = Math.floor(ms / 6e4);
+    const secs = (ms % 6e4 / 1e3).toFixed(0);
+    return `${mins}m ${secs}s`;
+  };
+  const getJobTypeIcon = (jobType) => {
+    switch (jobType) {
+      case "llm-transform":
+        return "✨";
+      case "chart-render":
+        return "📊";
+      case "automation":
+        return "🤖";
+      case "opencode":
+        return "💻";
+      default:
+        return "⚡";
+    }
+  };
+  const toggleExpand = (id2) => {
+    setExpandedId(expandedId === id2 ? null : id2);
+  };
+  const loadImage = reactExports.useCallback(async (imagePath, opId) => {
+    if (imageCache.has(imagePath)) {
+      setLoadedImages((prev) => new Map(prev).set(opId, imageCache.get(imagePath)));
+      return;
+    }
+    try {
+      console.log("[OperationsHistory] Loading image:", imagePath);
+      const result = await window.clipmorph.getImageBase64(imagePath);
+      console.log("[OperationsHistory] Image result success:", isIpcSuccess(result));
+      console.log("[OperationsHistory] Has base64:", !!result?.data?.base64);
+      console.log("[OperationsHistory] Base64 length:", result?.data?.base64?.length);
+      if (isIpcSuccess(result) && result.data?.base64) {
+        const cleanBase64 = result.data.base64.replace(/[\r\n]/g, "");
+        const dataUrl = `data:${result.data.mimeType};base64,${cleanBase64}`;
+        console.log("[OperationsHistory] Data URL length:", dataUrl.length);
+        console.log("[OperationsHistory] Data URL prefix:", dataUrl.substring(0, 50));
+        imageCache.set(imagePath, dataUrl);
+        setLoadedImages((prev) => new Map(prev).set(opId, dataUrl));
+      } else {
+        console.error("[OperationsHistory] Failed result:", result);
+        setLoadedImages((prev) => new Map(prev).set(opId, "error"));
+      }
+    } catch (err) {
+      console.error("Failed to load image:", err);
+      setLoadedImages((prev) => new Map(prev).set(opId, "error"));
+    }
+  }, []);
+  reactExports.useEffect(() => {
+    if (expandedId) {
+      const op = operations.find((o) => o.id === expandedId);
+      if (op?.output_image_path && !loadedImages.has(expandedId)) {
+        loadImage(op.output_image_path, expandedId);
+      }
+    }
+  }, [expandedId, operations, loadedImages, loadImage]);
+  const handleCopyImage = async (imagePath, opId) => {
+    setCopyingId(opId);
+    try {
+      const result = await window.clipmorph.copyImageToClipboard(imagePath);
+      if (isIpcSuccess(result)) {
+        setTimeout(() => setCopyingId(null), 500);
+      } else {
+        console.error("Failed to copy image:", result);
+        setCopyingId(null);
+      }
+    } catch (err) {
+      console.error("Failed to copy image:", err);
+      setCopyingId(null);
+    }
+  };
+  const handleCopyText = async (text) => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (err) {
+      console.error("Failed to copy text:", err);
+    }
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "operations-history-overlay", onClick: onClose, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "operations-history-panel", onClick: (e) => e.stopPropagation(), children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "operations-history-header", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { children: "History" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "operations-history-actions", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "refresh-btn", onClick: loadOperations, title: "Refresh", children: "🔄" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "clear-btn", onClick: handleClear, title: "Clear history", children: "🗑️" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "close-btn", onClick: onClose, children: "✕" })
       ] })
-    ] }, t2.id)) }) }),
-    transcripts.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("footer", { className: "transcript-footer", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "transcript-count", children: [
-        transcripts.length,
-        " transcript(s)"
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx(
-        "button",
-        {
-          className: "clear-btn",
-          onClick: handleClear,
-          disabled: clearing,
-          children: clearing ? "Clearing..." : "Clear All"
-        }
-      )
-    ] })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "operations-history-content", children: loading ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "operations-loading", children: "Loading..." }) : operations.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "operations-empty", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: "No operations yet" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "operations-empty-hint", children: "Use voice or text commands to transform clipboard content" })
+    ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "operations-list", children: operations.map((op) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "div",
+      {
+        className: `operation-item ${op.success ? "success" : "failed"} ${expandedId === op.id ? "expanded" : ""}`,
+        onClick: () => toggleExpand(op.id),
+        children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "operation-header", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "operation-icon", children: getJobTypeIcon(op.job_type) }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "operation-command", children: [
+              '"',
+              truncate(op.command, 40),
+              '"'
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `operation-status ${op.success ? "success" : "failed"}`, children: op.success ? "✓" : "✗" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "operation-time", children: formatTime(op.created_at) })
+          ] }),
+          expandedId === op.id && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "operation-details", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "operation-detail-row", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "detail-label", children: "Command:" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "detail-value", children: op.command })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "operation-detail-row", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "detail-label", children: "Type:" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "detail-value", children: op.job_type })
+            ] }),
+            op.duration_ms && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "operation-detail-row", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "detail-label", children: "Duration:" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "detail-value", children: formatDuration(op.duration_ms) })
+            ] }),
+            op.error && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "operation-detail-row error", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "detail-label", children: "Error:" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "detail-value", children: op.error })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "operation-io", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "io-section", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "io-label", children: "📥 Input (Clipboard):" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { className: "io-content", children: truncate(op.input_text, 500) })
+              ] }),
+              op.output_text && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "io-section", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "io-label", children: [
+                  "📤 Output:",
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "button",
+                    {
+                      className: "copy-btn small",
+                      onClick: (e) => {
+                        e.stopPropagation();
+                        handleCopyText(op.output_text);
+                      },
+                      title: "Copy output to clipboard",
+                      children: "📋"
+                    }
+                  )
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { className: "io-content", children: truncate(op.output_text, 500) })
+              ] }),
+              op.output_image_path && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "io-section image-section", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "io-label", children: [
+                  "🖼️ Image Output (",
+                  op.output_image_size ? (op.output_image_size / 1024).toFixed(1) + " KB" : "N/A",
+                  "):",
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "button",
+                    {
+                      className: `copy-btn small ${copyingId === op.id ? "copied" : ""}`,
+                      onClick: (e) => {
+                        e.stopPropagation();
+                        handleCopyImage(op.output_image_path, op.id);
+                      },
+                      title: "Copy image to clipboard",
+                      disabled: copyingId === op.id,
+                      children: copyingId === op.id ? "✓" : "📋"
+                    }
+                  )
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "image-preview", children: loadedImages.has(op.id) ? loadedImages.get(op.id) === "error" ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "image-error", children: "Image not found or failed to load" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "img",
+                  {
+                    src: loadedImages.get(op.id),
+                    alt: "Chart output",
+                    className: "output-image"
+                  }
+                ) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "image-loading", children: "Loading preview..." }) })
+              ] })
+            ] })
+          ] })
+        ]
+      },
+      op.id
+    )) }) })
   ] }) });
 }
 function LastAction() {
@@ -8004,8 +8324,8 @@ function App() {
             className: "header-btn",
             onClick: () => setShowHistory(true),
             "aria-label": "History",
-            title: "Transcript History",
-            children: "📝"
+            title: "History",
+            children: "📋"
           }
         ),
         /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -8055,7 +8375,7 @@ function App() {
       ] })
     ] }) }),
     showSettings && /* @__PURE__ */ jsxRuntimeExports.jsx(Settings, { onClose: () => setShowSettings(false) }),
-    showHistory && /* @__PURE__ */ jsxRuntimeExports.jsx(TranscriptHistory, { onClose: () => setShowHistory(false) }),
+    showHistory && /* @__PURE__ */ jsxRuntimeExports.jsx(OperationsHistory, { onClose: () => setShowHistory(false) }),
     /* @__PURE__ */ jsxRuntimeExports.jsx(LastAction, {}),
     /* @__PURE__ */ jsxRuntimeExports.jsx(JobStatus, {})
   ] });

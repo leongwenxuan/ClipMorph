@@ -106,6 +106,12 @@ export const IpcChannels = {
   SKILL_GET: 'clipmorph:skill:get',
   SKILL_EXPORT: 'clipmorph:skill:export',
   SKILL_IMPORT: 'clipmorph:skill:import',
+
+  // Operations history domain
+  HISTORY_GET: 'clipmorph:history:get',
+  HISTORY_CLEAR: 'clipmorph:history:clear',
+  HISTORY_COPY_IMAGE: 'clipmorph:history:copy-image',
+  HISTORY_GET_IMAGE: 'clipmorph:history:get-image',
 } as const
 
 export type IpcChannel = (typeof IpcChannels)[keyof typeof IpcChannels]
@@ -619,7 +625,7 @@ export interface SettingsChangedPayload {
 // Secrets Types (API Keys via Keychain)
 // ============================================================================
 
-export type SecretKey = 'openai-api-key' | 'anthropic-api-key'
+export type SecretKey = 'openai-api-key' | 'anthropic-api-key' | 'cerebras-api-key'
 
 export interface SecretsGetRequest {
   key: SecretKey
@@ -1348,6 +1354,35 @@ export interface SkillImportedPayload {
 export interface SkillExportedPayload {
   skillId: string
   exportPath: string
+}
+
+// ============================================================================
+// Operations History Types
+// ============================================================================
+
+/**
+ * A single operation history entry
+ */
+export interface OperationHistoryEntry {
+  id: string
+  command: string
+  job_type: string
+  input_text: string
+  input_html: string | null
+  output_text: string | null
+  output_image_size: number | null
+  output_image_path: string | null
+  success: boolean
+  error: string | null
+  duration_ms: number | null
+  created_at: number
+}
+
+/**
+ * Response from getting operations history
+ */
+export interface OperationHistoryResponse {
+  operations: OperationHistoryEntry[]
 }
 
 // ============================================================================
