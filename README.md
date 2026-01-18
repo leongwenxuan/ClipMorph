@@ -181,6 +181,16 @@ Access settings by clicking the ⚙️ icon in the app.
 - Look for a small circle icon in the top-right area of your screen
 - Try clicking in the menubar area — the icon may be hidden behind other icons
 
+## Acknowledgements
+
+ClipMorph is built on the shoulders of these excellent open source projects:
+
+- **[OpenCode](https://github.com/sst/opencode)** — AI-powered coding agent that powers ClipMorph's code editing capabilities
+- **[Browser Use](https://github.com/browser-use/browser-use)** — Browser automation framework enabling web interaction and scraping features
+- **[ElevenLabs](https://elevenlabs.io/)** — Real-time speech-to-text transcription
+- **[Electron](https://www.electronjs.org/)** — Cross-platform desktop app framework
+- **[React](https://react.dev/)** — UI library
+
 ## License
 
 MIT
